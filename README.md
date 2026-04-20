@@ -13,6 +13,7 @@ Current milestone:
 - TypeScript runtime
 - phone-accessible dashboard
 - WebSocket runtime stream (`/api/ws`)
+- read-only Polymarket market snapshot (Gamma + CLOB midpoint data)
 - bounded control API
 - file-backed bootstrap ledger/state
 - safe defaults (paper mode, live disarmed)
@@ -35,6 +36,7 @@ Examples:
 ## Important safety notes
 
 - dashboard runtime updates stream over WebSocket at `/api/ws`
+- market discovery is read-only and currently refreshes from Polymarket Gamma + CLOB on a timed cadence
 - control endpoints require `X-Phantom3-Token` or `Authorization: Bearer <token>`
 - live mode is not implemented in this bootstrap
 - this app is safe to expose to your LAN only because it is read-first and control actions are token-gated
@@ -49,6 +51,7 @@ packages/
   config/      runtime config helpers
   contracts/   shared runtime shapes/types
   ledger/      planned durable ledger package (placeholder)
+  market-data/ read-only Polymarket market snapshot adapter
 docs/
   architecture/
 scripts/

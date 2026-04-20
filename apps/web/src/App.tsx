@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import type { RuntimeState } from '../../../packages/contracts/src/index';
 
 const tokenStorageKey = 'phantom3-v2-control-token';
+const compactNumber = new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 1 });
 
 type SocketState = 'connecting' | 'live' | 'reconnecting' | 'offline';
 
@@ -21,6 +22,14 @@ async function fetchRuntime(): Promise<RuntimeState> {
 function websocketUrl(): string {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   return `${protocol}//${window.location.host}/api/ws`;
+}
+
+function formatPercent(value: number | null): string {
+  return value === null ? '...' : `${(value * 100).toFixed(1)}%`;
+}
+
+function formatMaybeMoney(value: number | null): string {
+  return value === null ? '...' : compactNumber.format(value);
 }
 
 export function App() {
@@ -112,7 +121,7 @@ export function App() {
 
   const statusTone = useMemo(() => {
     if (!runtime) return 'idle';
-    if (runtime.paused) return 'warning';
+    if (runtime.paused || runtime.marketData.stale) return 'warning';
     return 'healthy';
   }, [runtime]);
 
@@ -148,9 +157,9 @@ export function App() {
       <section className="hero card">
         <div>
           <p className="eyebrow">Phantom3 v2</p>
-          <h1>Phone-ready bootstrap dashboard</h1>
+          <h1>Phone-ready observer dashboard</h1>
           <p className="subtle">
-            Safe-by-default v2 control plane. Read-only access is open, write actions require the control token.
+            Safe-by-default v2 control plane. Market truth is now read live from Polymarket, while write actions remain token-gated.
           </p>
         </div>
         <div className={`status-pill ${statusTone}`}>
@@ -174,6 +183,62 @@ export function App() {
         </article>
 
         <article className="card">
+          <p className="eyebrow">Market sync</p>
+          <h2>{runtime?.marketData.stale ? 'Sync degraded' : `${runtime?.markets.length ?? 0} live markets`}</h2>
+          <p className="subtle">Read-only snapshot from {runtime?.marketData.source ?? '...'}</p>
+          <div className="kv-list">
+            <div><span>Status</span><strong>{runtime?.marketData.stale ? 'stale' : 'live'}</strong></div>
+            <div><span>Cadence</span><strong>{runtime ? `${Math.round(runtime.marketData.refreshIntervalMs / 1000)}s` : '...'}</strong></div>
+            <div><span>Last sync</span><strong>{runtime?.marketData.syncedAt ? new Date(runtime.marketData.syncedAt).toLocaleTimeString() : '...'}</strong></div>
+            <div><span>Error</span><strong>{runtime?.marketData.error ?? 'none'}</strong></div>
+          </div>
+        </article>
+      </section>
+
+      <section className="card">
+        <div className="section-head">
+          <div>
+            <p className="eyebrow">Markets</p>
+            <h2>Read-only Polymarket snapshot</h2>
+          </div>
+        </div>
+        {runtime?.markets.length ? (
+          <div className="module-grid market-grid">
+            {runtime.markets.map((market) => (
+              <article key={market.id} className="module-card market-card">
+                <div className={`module-status ${runtime.marketData.stale ? 'warning' : 'healthy'}`}>
+                  {runtime.marketData.stale ? 'stale' : 'live'}
+                </div>
+                <div>
+                  <h3>{market.question}</h3>
+                  <p>{market.eventTitle}</p>
+                </div>
+                <div className="price-row">
+                  <div>
+                    <span>{market.yesLabel}</span>
+                    <strong>{formatPercent(market.yesPrice)}</strong>
+                  </div>
+                  <div>
+                    <span>{market.noLabel}</span>
+                    <strong>{formatPercent(market.noPrice)}</strong>
+                  </div>
+                </div>
+                <div className="market-meta">
+                  <span>24h vol {formatMaybeMoney(market.volume24hr)}</span>
+                  <span>liq {formatMaybeMoney(market.liquidity)}</span>
+                  <span>spread {formatPercent(market.spread)}</span>
+                </div>
+                <a className="market-link" href={market.url} target="_blank" rel="noreferrer">open market</a>
+              </article>
+            ))}
+          </div>
+        ) : (
+          <p className="subtle">No live markets loaded yet.</p>
+        )}
+      </section>
+
+      <section className="grid two-up">
+        <article className="card">
           <p className="eyebrow">Controls</p>
           <label className="token-field">
             <span>Control token</span>
@@ -189,6 +254,21 @@ export function App() {
             <button className="secondary" disabled={busy || loading} onClick={() => void sendControl('/api/control/resume')}>Resume</button>
           </div>
           <p className="subtle small">Live trading is not wired in this bootstrap. These controls only affect the prototype runtime state.</p>
+        </article>
+
+        <article className="card">
+          <p className="eyebrow">Watchlist</p>
+          <div className="stack-list">
+            {runtime?.watchlist.map((entry) => (
+              <div className="list-item" key={entry.id}>
+                <div>
+                  <strong>{entry.label}</strong>
+                  <p>{entry.note}</p>
+                </div>
+                <span className={`badge ${entry.status}`}>{entry.status}</span>
+              </div>
+            ))}
+          </div>
         </article>
       </section>
 
@@ -210,36 +290,19 @@ export function App() {
         </div>
       </section>
 
-      <section className="grid two-up">
-        <article className="card">
-          <p className="eyebrow">Watchlist</p>
-          <div className="stack-list">
-            {runtime?.watchlist.map((entry) => (
-              <div className="list-item" key={entry.id}>
-                <div>
-                  <strong>{entry.label}</strong>
-                  <p>{entry.note}</p>
-                </div>
-                <span className={`badge ${entry.status}`}>{entry.status}</span>
+      <section className="card">
+        <p className="eyebrow">Event log</p>
+        <div className="event-list">
+          {runtime?.events.map((entry) => (
+            <div className={`event ${entry.level}`} key={entry.id}>
+              <div>
+                <strong>{entry.message}</strong>
+                <p>{new Date(entry.at).toLocaleString()}</p>
               </div>
-            ))}
-          </div>
-        </article>
-
-        <article className="card">
-          <p className="eyebrow">Event log</p>
-          <div className="event-list">
-            {runtime?.events.map((entry) => (
-              <div className={`event ${entry.level}`} key={entry.id}>
-                <div>
-                  <strong>{entry.message}</strong>
-                  <p>{new Date(entry.at).toLocaleString()}</p>
-                </div>
-                <span>{entry.level}</span>
-              </div>
-            ))}
-          </div>
-        </article>
+              <span>{entry.level}</span>
+            </div>
+          ))}
+        </div>
       </section>
     </main>
   );

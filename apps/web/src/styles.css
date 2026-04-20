@@ -119,6 +119,9 @@ input {
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 12px;
 }
+.market-grid {
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+}
 .module-card {
   background: rgba(15, 23, 42, 0.65);
   border-radius: 14px;
@@ -126,7 +129,34 @@ input {
   display: grid;
   gap: 10px;
 }
+.market-card {
+  align-content: start;
+}
 .module-card p { color: #cbd5e1; margin-bottom: 0; }
+.price-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.price-row div {
+  background: rgba(30, 41, 59, 0.7);
+  border-radius: 12px;
+  padding: 10px 12px;
+  display: grid;
+  gap: 4px;
+}
+.price-row span, .market-meta span { color: #94a3b8; font-size: 0.85rem; }
+.price-row strong { font-size: 1.1rem; }
+.market-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.market-link {
+  color: #c4b5fd;
+  text-decoration: none;
+  font-weight: 700;
+}
 .error-banner {
   border-color: rgba(248, 113, 113, 0.3);
   color: #fecaca;

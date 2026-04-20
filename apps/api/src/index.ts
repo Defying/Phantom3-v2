@@ -35,7 +35,16 @@ async function main(): Promise<void> {
     prefix: '/'
   });
 
-  app.get('/api/health', async () => ({ ok: true, app: 'Phantom3 v2', mode: store.getState().mode }));
+  app.get('/api/health', async () => {
+    const state = store.getState();
+    return {
+      ok: true,
+      app: 'Phantom3 v2',
+      mode: state.mode,
+      markets: state.markets.length,
+      marketDataStale: state.marketData.stale
+    };
+  });
   app.get('/api/runtime', async () => store.getState());
   app.get('/api/access', async () => ({
     publicBaseUrl: config.publicBaseUrl,
@@ -109,6 +118,9 @@ async function main(): Promise<void> {
   });
 
   setInterval(() => store.heartbeat(), 15000).unref();
+  setInterval(() => {
+    void store.refreshMarketData();
+  }, config.marketRefreshMs).unref();
 
   await app.listen({ host: config.host, port: config.port });
   app.log.info(`Phantom3 v2 listening on ${config.publicBaseUrl}`);

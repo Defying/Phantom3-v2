@@ -30,6 +30,33 @@ export const watchEntrySchema = z.object({
 });
 export type WatchEntry = z.infer<typeof watchEntrySchema>;
 
+export const runtimeMarketDataSchema = z.object({
+  source: z.string(),
+  syncedAt: z.string().nullable(),
+  stale: z.boolean(),
+  refreshIntervalMs: z.number().int().positive(),
+  error: z.string().nullable()
+});
+export type RuntimeMarketData = z.infer<typeof runtimeMarketDataSchema>;
+
+export const runtimeMarketSchema = z.object({
+  id: z.string(),
+  eventId: z.string(),
+  slug: z.string(),
+  eventTitle: z.string(),
+  question: z.string(),
+  yesLabel: z.string(),
+  noLabel: z.string(),
+  yesPrice: z.number().nullable(),
+  noPrice: z.number().nullable(),
+  spread: z.number().nullable(),
+  volume24hr: z.number().nullable(),
+  liquidity: z.number().nullable(),
+  endDate: z.string().nullable(),
+  url: z.string().url()
+});
+export type RuntimeMarket = z.infer<typeof runtimeMarketSchema>;
+
 export const runtimeStateSchema = z.object({
   appName: z.literal('Phantom3 v2'),
   version: z.string(),
@@ -39,6 +66,8 @@ export const runtimeStateSchema = z.object({
   paused: z.boolean(),
   remoteDashboardEnabled: z.boolean(),
   publicBaseUrl: z.string(),
+  marketData: runtimeMarketDataSchema,
+  markets: z.array(runtimeMarketSchema),
   modules: z.array(runtimeModuleSchema),
   watchlist: z.array(watchEntrySchema),
   events: z.array(runtimeEventSchema)
