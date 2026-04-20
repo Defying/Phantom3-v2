@@ -16,10 +16,13 @@ function event(level: RuntimeEvent['level'], message: string): RuntimeEvent {
   };
 }
 
+type RuntimeListener = (state: RuntimeState) => void;
+
 export class RuntimeStore {
   private readonly statePath: string;
   private state: RuntimeState;
   private persistTimer: NodeJS.Timeout | null = null;
+  private listeners = new Set<RuntimeListener>();
 
   constructor(private readonly config: AppConfig) {
     this.statePath = join(config.dataDir, 'runtime-state.json');
@@ -73,12 +76,21 @@ export class RuntimeStore {
   }
 
   getState(): RuntimeState {
-    return this.state;
+    return structuredClone(this.state);
+  }
+
+  subscribe(listener: RuntimeListener): () => void {
+    this.listeners.add(listener);
+    listener(this.getState());
+    return () => {
+      this.listeners.delete(listener);
+    };
   }
 
   pushEvent(level: RuntimeEvent['level'], message: string): void {
     this.state.events = [event(level, message), ...this.state.events].slice(0, 40);
     this.schedulePersist();
+    this.notify();
   }
 
   setPaused(paused: boolean): void {
@@ -90,6 +102,7 @@ export class RuntimeStore {
   heartbeat(): void {
     this.state.lastHeartbeatAt = isoNow();
     this.schedulePersist();
+    this.notify();
   }
 
   private schedulePersist(): void {
@@ -101,6 +114,13 @@ export class RuntimeStore {
       this.persistTimer = null;
     }, 50);
     this.persistTimer.unref();
+  }
+
+  private notify(): void {
+    const snapshot = this.getState();
+    for (const listener of this.listeners) {
+      listener(snapshot);
+    }
   }
 
   private async persist(): Promise<void> {

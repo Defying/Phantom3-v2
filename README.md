@@ -12,6 +12,7 @@ Current milestone:
 - v2 repo bootstrap
 - TypeScript runtime
 - phone-accessible dashboard
+- WebSocket runtime stream (`/api/ws`)
 - bounded control API
 - file-backed bootstrap ledger/state
 - safe defaults (paper mode, live disarmed)
@@ -33,6 +34,7 @@ Examples:
 
 ## Important safety notes
 
+- dashboard runtime updates stream over WebSocket at `/api/ws`
 - control endpoints require `X-Phantom3-Token` or `Authorization: Bearer <token>`
 - live mode is not implemented in this bootstrap
 - this app is safe to expose to your LAN only because it is read-first and control actions are token-gated

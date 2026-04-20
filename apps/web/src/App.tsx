@@ -3,6 +3,13 @@ import type { RuntimeState } from '../../../packages/contracts/src/index';
 
 const tokenStorageKey = 'phantom3-v2-control-token';
 
+type SocketState = 'connecting' | 'live' | 'reconnecting' | 'offline';
+
+type RuntimeEnvelope = {
+  type: 'runtime';
+  data: RuntimeState;
+};
+
 async function fetchRuntime(): Promise<RuntimeState> {
   const response = await fetch('/api/runtime');
   if (!response.ok) {
@@ -11,21 +18,29 @@ async function fetchRuntime(): Promise<RuntimeState> {
   return response.json();
 }
 
+function websocketUrl(): string {
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${protocol}//${window.location.host}/api/ws`;
+}
+
 export function App() {
   const [runtime, setRuntime] = useState<RuntimeState | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [token, setToken] = useState(() => localStorage.getItem(tokenStorageKey) ?? '');
   const [busy, setBusy] = useState(false);
+  const [socketState, setSocketState] = useState<SocketState>('connecting');
 
   useEffect(() => {
     let cancelled = false;
-    const load = async () => {
+    let socket: WebSocket | null = null;
+    let reconnectTimer: number | null = null;
+
+    const loadFallback = async () => {
       try {
         const next = await fetchRuntime();
         if (!cancelled) {
           setRuntime(next);
-          setError(null);
           setLoading(false);
         }
       } catch (err) {
@@ -35,11 +50,59 @@ export function App() {
         }
       }
     };
-    void load();
-    const timer = window.setInterval(load, 5000);
+
+    const connect = () => {
+      setSocketState((current) => (current === 'live' ? 'reconnecting' : 'connecting'));
+      socket = new WebSocket(websocketUrl());
+
+      socket.addEventListener('open', () => {
+        if (cancelled) {
+          return;
+        }
+        setSocketState('live');
+        setError(null);
+      });
+
+      socket.addEventListener('message', (event) => {
+        if (cancelled) {
+          return;
+        }
+        try {
+          const message = JSON.parse(event.data) as RuntimeEnvelope | { type: 'pong'; at: string };
+          if (message.type === 'runtime') {
+            setRuntime(message.data);
+            setLoading(false);
+            setError(null);
+          }
+        } catch {
+          setError('Received invalid WebSocket payload.');
+        }
+      });
+
+      socket.addEventListener('error', () => {
+        if (!cancelled) {
+          setSocketState('offline');
+        }
+      });
+
+      socket.addEventListener('close', () => {
+        if (cancelled) {
+          return;
+        }
+        setSocketState('reconnecting');
+        reconnectTimer = window.setTimeout(connect, 1500);
+      });
+    };
+
+    void loadFallback();
+    connect();
+
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
+      if (reconnectTimer !== null) {
+        window.clearTimeout(reconnectTimer);
+      }
+      socket?.close();
     };
   }, []);
 
@@ -104,6 +167,7 @@ export function App() {
           <p className="subtle">Open this URL from your phone while on the same network.</p>
           <div className="kv-list">
             <div><span>Mode</span><strong>{runtime?.mode ?? '...'}</strong></div>
+            <div><span>Transport</span><strong>{`WebSocket (${socketState})`}</strong></div>
             <div><span>Remote dashboard</span><strong>{runtime?.remoteDashboardEnabled ? 'enabled' : 'disabled'}</strong></div>
             <div><span>Last heartbeat</span><strong>{runtime?.lastHeartbeatAt ? new Date(runtime.lastHeartbeatAt).toLocaleTimeString() : '...'}</strong></div>
           </div>

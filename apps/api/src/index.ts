@@ -2,6 +2,7 @@ import 'dotenv/config';
 
 import fastify from 'fastify';
 import fastifyStatic from '@fastify/static';
+import fastifyWebsocket from '@fastify/websocket';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { readConfig } from '../../../packages/config/src/index.js';
@@ -27,6 +28,8 @@ function isAuthorized(headers: Record<string, unknown>): boolean {
 async function main(): Promise<void> {
   await store.init();
 
+  await app.register(fastifyWebsocket);
+
   await app.register(fastifyStatic, {
     root: webRoot,
     prefix: '/'
@@ -38,8 +41,48 @@ async function main(): Promise<void> {
     publicBaseUrl: config.publicBaseUrl,
     remoteDashboardEnabled: config.remoteDashboardEnabled,
     controlTokenConfigured: true,
+    transport: 'websocket',
+    wsEndpoint: '/api/ws',
     note: 'Read endpoints are open. Control routes require a token.'
   }));
+
+  app.get('/api/ws', { websocket: true }, (socket) => {
+    const sendRuntime = () => {
+      if (socket.readyState === 1) {
+        socket.send(JSON.stringify({ type: 'runtime', data: store.getState() }));
+      }
+    };
+
+    const unsubscribe = store.subscribe((state) => {
+      if (socket.readyState === 1) {
+        socket.send(JSON.stringify({ type: 'runtime', data: state }));
+      }
+    });
+
+    socket.on('message', (raw: Buffer | ArrayBuffer | Buffer[] | string) => {
+      let payload: unknown = null;
+      try {
+        const text = typeof raw === 'string'
+          ? raw
+          : Array.isArray(raw)
+            ? Buffer.concat(raw).toString('utf8')
+            : Buffer.isBuffer(raw)
+              ? raw.toString('utf8')
+              : Buffer.from(raw).toString('utf8');
+        payload = JSON.parse(text);
+      } catch {
+        payload = null;
+      }
+      if (payload && typeof payload === 'object' && 'type' in payload && payload.type === 'ping') {
+        if (socket.readyState === 1) {
+          socket.send(JSON.stringify({ type: 'pong', at: new Date().toISOString() }));
+        }
+      }
+    });
+
+    socket.on('close', unsubscribe);
+    socket.on('error', () => unsubscribe());
+  });
 
   app.post('/api/control/pause', async (request, reply) => {
     if (!isAuthorized(request.headers as Record<string, unknown>)) {
