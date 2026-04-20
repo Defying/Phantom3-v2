@@ -25,9 +25,11 @@ npm run build:web
 npm run start
 ```
 
-Then open the dashboard at the configured public URL, for example:
+Then open the dashboard at the configured public URL.
 
-- `http://10.0.0.111:4317`
+Examples:
+- local machine: `http://127.0.0.1:4317`
+- phone on same LAN: `http://<your-server-host-or-lan-ip>:4317`
 
 ## Important safety notes
 
