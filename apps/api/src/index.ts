@@ -3,8 +3,8 @@ import 'dotenv/config';
 import fastify from 'fastify';
 import fastifyStatic from '@fastify/static';
 import fastifyWebsocket from '@fastify/websocket';
-import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { readConfig } from '../../../packages/config/src/index.js';
 import { RuntimeStore } from './runtime-store.js';
 
@@ -25,6 +25,25 @@ function isAuthorized(headers: Record<string, unknown>): boolean {
   return typeof supplied === 'string' && supplied.length > 0 && supplied === config.controlToken;
 }
 
+function readLimit(query: unknown, fallback: number, maximum: number): number {
+  if (!query || typeof query !== 'object') {
+    return fallback;
+  }
+
+  const raw = (query as Record<string, unknown>).limit;
+  const parsed = typeof raw === 'number'
+    ? raw
+    : typeof raw === 'string' && raw.trim().length > 0
+      ? Number(raw)
+      : Number.NaN;
+
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+
+  return Math.min(Math.max(Math.trunc(parsed), 1), maximum);
+}
+
 async function main(): Promise<void> {
   await store.init();
 
@@ -42,26 +61,49 @@ async function main(): Promise<void> {
       app: 'Phantom3 v2',
       mode: state.mode,
       markets: state.markets.length,
-      marketDataStale: state.marketData.stale
+      marketDataStale: state.marketData.stale,
+      strategyStatus: state.strategy.status,
+      strategyCandidates: state.strategy.candidateCount
     };
   });
+
   app.get('/api/runtime', async () => store.getState());
+  app.get('/api/runtime/strategy', async () => store.getStrategySummary());
+
+  app.get('/api/paper/strategy', async (request, reply) => {
+    const paperStrategy = store.getPaperStrategyView(readLimit(request.query, 6, 12));
+    if (!paperStrategy) {
+      return reply.code(409).send({ error: 'Paper strategy data is only available while the runtime is in paper mode.' });
+    }
+    return paperStrategy;
+  });
+
+  app.get('/api/paper/strategy/snapshots', async (request, reply) => {
+    const state = store.getState();
+    if (state.mode !== 'paper') {
+      return reply.code(409).send({ error: 'Paper strategy snapshots are only available while the runtime is in paper mode.' });
+    }
+
+    return {
+      mode: 'paper',
+      safeToExpose: true,
+      snapshots: store.getStrategySnapshots(readLimit(request.query, 6, 12))
+    };
+  });
+
   app.get('/api/access', async () => ({
     publicBaseUrl: config.publicBaseUrl,
     remoteDashboardEnabled: config.remoteDashboardEnabled,
     controlTokenConfigured: true,
     transport: 'websocket',
     wsEndpoint: '/api/ws',
-    note: 'Read endpoints are open. Control routes require a token.'
+    strategySummaryEndpoint: '/api/runtime/strategy',
+    paperStrategyEndpoint: '/api/paper/strategy',
+    paperStrategySnapshotsEndpoint: '/api/paper/strategy/snapshots',
+    note: 'Read endpoints are open. Paper strategy routes are sanitized and read-only. Control routes require a token.'
   }));
 
   app.get('/api/ws', { websocket: true }, (socket) => {
-    const sendRuntime = () => {
-      if (socket.readyState === 1) {
-        socket.send(JSON.stringify({ type: 'runtime', data: store.getState() }));
-      }
-    };
-
     const unsubscribe = store.subscribe((state) => {
       if (socket.readyState === 1) {
         socket.send(JSON.stringify({ type: 'runtime', data: state }));

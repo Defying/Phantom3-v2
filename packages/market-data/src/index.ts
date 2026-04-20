@@ -137,6 +137,8 @@ export async function fetchTopMarkets(options: { limit: number; timeoutMs?: numb
       question: market.question ?? event.title ?? 'Untitled market',
       yesLabel: outcomes[0] ?? 'Yes',
       noLabel: outcomes[1] ?? 'No',
+      yesTokenId: tokenIds[0] ?? null,
+      noTokenId: tokenIds[1] ?? null,
       yesPrice,
       noPrice,
       spread: asNumber(market.spread),

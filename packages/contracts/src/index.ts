@@ -1,5 +1,8 @@
 import { z } from 'zod';
 
+export const runtimeModeSchema = z.enum(['paper', 'live-disarmed']);
+export type RuntimeMode = z.infer<typeof runtimeModeSchema>;
+
 export const moduleStatusSchema = z.enum(['healthy', 'idle', 'warning', 'blocked']);
 export type ModuleStatus = z.infer<typeof moduleStatusSchema>;
 
@@ -47,6 +50,8 @@ export const runtimeMarketSchema = z.object({
   question: z.string(),
   yesLabel: z.string(),
   noLabel: z.string(),
+  yesTokenId: z.string().nullable(),
+  noTokenId: z.string().nullable(),
   yesPrice: z.number().nullable(),
   noPrice: z.number().nullable(),
   spread: z.number().nullable(),
@@ -57,10 +62,115 @@ export const runtimeMarketSchema = z.object({
 });
 export type RuntimeMarket = z.infer<typeof runtimeMarketSchema>;
 
+export const strategyRuntimeStatusSchema = z.enum(['idle', 'observing', 'paused', 'degraded']);
+export type StrategyRuntimeStatus = z.infer<typeof strategyRuntimeStatusSchema>;
+
+export const strategyCandidateSchema = z.object({
+  marketId: z.string(),
+  slug: z.string(),
+  question: z.string(),
+  yesPrice: z.number().nullable(),
+  noPrice: z.number().nullable(),
+  spread: z.number().nullable(),
+  liquidity: z.number().nullable(),
+  volume24hr: z.number().nullable(),
+  score: z.number().nonnegative(),
+  status: z.enum(['watch', 'pending-data']),
+  rationale: z.string()
+});
+export type StrategyCandidate = z.infer<typeof strategyCandidateSchema>;
+
+export const paperIntentSummarySchema = z.object({
+  id: z.string(),
+  marketId: z.string(),
+  marketQuestion: z.string(),
+  side: z.enum(['yes', 'no']),
+  status: z.enum(['draft', 'watching', 'submitted', 'closed']),
+  createdAt: z.string(),
+  thesis: z.string(),
+  desiredSizeUsd: z.number().nonnegative(),
+  maxEntryPrice: z.number().min(0).max(1).nullable()
+});
+export type PaperIntentSummary = z.infer<typeof paperIntentSummarySchema>;
+
+export const riskDecisionSummarySchema = z.object({
+  id: z.string(),
+  intentId: z.string(),
+  marketId: z.string(),
+  question: z.string(),
+  decision: z.enum(['approve', 'reject', 'resize', 'block']),
+  approvedSizeUsd: z.number().nonnegative(),
+  createdAt: z.string(),
+  reasons: z.array(z.string())
+});
+export type RiskDecisionSummary = z.infer<typeof riskDecisionSummarySchema>;
+
+export const paperPositionSummarySchema = z.object({
+  id: z.string(),
+  marketId: z.string(),
+  tokenId: z.string().nullable(),
+  marketQuestion: z.string(),
+  side: z.enum(['yes', 'no']),
+  quantity: z.number().nonnegative(),
+  averageEntryPrice: z.number().min(0).max(1),
+  markPrice: z.number().min(0).max(1).nullable(),
+  unrealizedPnlUsd: z.number().nullable(),
+  openedAt: z.string(),
+  status: z.enum(['open', 'closed'])
+});
+export type PaperPositionSummary = z.infer<typeof paperPositionSummarySchema>;
+
+export const strategyRuntimeSummarySchema = z.object({
+  engineId: z.string(),
+  strategyVersion: z.string(),
+  mode: runtimeModeSchema,
+  status: strategyRuntimeStatusSchema,
+  safeToExpose: z.literal(true),
+  lastEvaluatedAt: z.string().nullable(),
+  lastSnapshotAt: z.string().nullable(),
+  watchedMarketCount: z.number().int().nonnegative(),
+  candidateCount: z.number().int().nonnegative(),
+  openIntentCount: z.number().int().nonnegative(),
+  openPositionCount: z.number().int().nonnegative(),
+  openExposureUsd: z.number().nonnegative(),
+  summary: z.string(),
+  candidates: z.array(strategyCandidateSchema),
+  intents: z.array(paperIntentSummarySchema),
+  riskDecisions: z.array(riskDecisionSummarySchema),
+  positions: z.array(paperPositionSummarySchema),
+  notes: z.array(z.string())
+});
+export type StrategyRuntimeSummary = z.infer<typeof strategyRuntimeSummarySchema>;
+
+export const strategyStateSnapshotSchema = z.object({
+  id: z.string(),
+  createdAt: z.string(),
+  trigger: z.enum(['bootstrap', 'market-refresh', 'market-refresh-error', 'pause', 'resume']),
+  mode: runtimeModeSchema,
+  status: strategyRuntimeStatusSchema,
+  summary: z.string(),
+  watchedMarketCount: z.number().int().nonnegative(),
+  candidates: z.array(strategyCandidateSchema),
+  intents: z.array(paperIntentSummarySchema),
+  riskDecisions: z.array(riskDecisionSummarySchema),
+  positions: z.array(paperPositionSummarySchema),
+  notes: z.array(z.string())
+});
+export type StrategyStateSnapshot = z.infer<typeof strategyStateSnapshotSchema>;
+
+export const paperStrategyViewSchema = z.object({
+  mode: z.literal('paper'),
+  safeToExpose: z.literal(true),
+  summary: strategyRuntimeSummarySchema,
+  latestSnapshot: strategyStateSnapshotSchema.nullable(),
+  snapshots: z.array(strategyStateSnapshotSchema)
+});
+export type PaperStrategyView = z.infer<typeof paperStrategyViewSchema>;
+
 export const runtimeStateSchema = z.object({
   appName: z.literal('Phantom3 v2'),
   version: z.string(),
-  mode: z.enum(['paper', 'live-disarmed']),
+  mode: runtimeModeSchema,
   startedAt: z.string(),
   lastHeartbeatAt: z.string(),
   paused: z.boolean(),
@@ -68,6 +178,7 @@ export const runtimeStateSchema = z.object({
   publicBaseUrl: z.string(),
   marketData: runtimeMarketDataSchema,
   markets: z.array(runtimeMarketSchema),
+  strategy: strategyRuntimeSummarySchema,
   modules: z.array(runtimeModuleSchema),
   watchlist: z.array(watchEntrySchema),
   events: z.array(runtimeEventSchema)

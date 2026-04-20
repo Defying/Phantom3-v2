@@ -61,8 +61,12 @@ h3 { margin-bottom: 6px; font-size: 1rem; }
 }
 .status-pill.healthy, .module-status.healthy, .badge.active { background: rgba(34, 197, 94, 0.18); color: #86efac; }
 .status-pill.warning, .module-status.warning, .badge.planned { background: rgba(245, 158, 11, 0.18); color: #fcd34d; }
-.module-status.idle, .badge.disabled { background: rgba(148, 163, 184, 0.18); color: #cbd5e1; }
-.module-status.blocked { background: rgba(239, 68, 68, 0.18); color: #fca5a5; }
+.status-pill.idle, .module-status.idle, .badge.disabled { background: rgba(148, 163, 184, 0.18); color: #cbd5e1; }
+.status-pill.blocked, .module-status.blocked { background: rgba(239, 68, 68, 0.18); color: #fca5a5; }
+.status-pill.info, .badge.info { background: rgba(59, 130, 246, 0.18); color: #93c5fd; }
+.badge.healthy { background: rgba(34, 197, 94, 0.18); color: #86efac; }
+.badge.warning, .badge.idle { background: rgba(245, 158, 11, 0.18); color: #fcd34d; }
+.badge.blocked { background: rgba(239, 68, 68, 0.18); color: #fca5a5; }
 
 .grid.two-up {
   display: grid;
@@ -70,7 +74,7 @@ h3 { margin-bottom: 6px; font-size: 1rem; }
   gap: 16px;
 }
 
-.kv-list, .stack-list, .event-list { display: grid; gap: 12px; }
+.kv-list, .stack-list, .event-list, .detail-list { display: grid; gap: 12px; }
 .kv-list div, .list-item, .event {
   display: flex;
   justify-content: space-between;
@@ -122,7 +126,7 @@ input {
 .market-grid {
   grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
 }
-.module-card {
+.module-card, .detail-card {
   background: rgba(15, 23, 42, 0.65);
   border-radius: 14px;
   padding: 14px;
@@ -132,7 +136,7 @@ input {
 .market-card {
   align-content: start;
 }
-.module-card p { color: #cbd5e1; margin-bottom: 0; }
+.module-card p, .detail-card p { color: #cbd5e1; margin-bottom: 0; }
 .price-row {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -162,16 +166,99 @@ input {
   color: #fecaca;
   background: rgba(127, 29, 29, 0.22);
 }
-.section-head { display: flex; justify-content: space-between; align-items: center; }
+.section-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+.section-head-stack {
+  align-items: flex-start;
+}
 .event { align-items: flex-start; }
 .event.info span { color: #c4b5fd; }
 .event.warning span { color: #fbbf24; }
 .event.error span { color: #fca5a5; }
 
+.summary-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
+  margin-top: 16px;
+}
+.summary-tile {
+  background: rgba(15, 23, 42, 0.65);
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 14px;
+  padding: 12px 14px;
+  display: grid;
+  gap: 6px;
+}
+.summary-tile span {
+  color: #94a3b8;
+  font-size: 0.82rem;
+}
+.summary-tile strong {
+  font-size: 1.1rem;
+}
+
+.detail-card {
+  border: 1px solid rgba(148, 163, 184, 0.12);
+}
+.detail-card-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+.detail-card-head h3 {
+  margin-bottom: 4px;
+}
+.field-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.field-grid-spacious {
+  margin-top: 14px;
+}
+.field-chip {
+  min-width: 120px;
+  flex: 1 1 150px;
+  background: rgba(30, 41, 59, 0.7);
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  border-radius: 12px;
+  padding: 10px 12px;
+  display: grid;
+  gap: 4px;
+}
+.field-chip span {
+  color: #94a3b8;
+  font-size: 0.78rem;
+}
+.field-chip strong {
+  font-size: 0.95rem;
+  line-height: 1.35;
+}
+.empty-state {
+  border-radius: 14px;
+  background: rgba(15, 23, 42, 0.65);
+  border: 1px dashed rgba(148, 163, 184, 0.2);
+  color: #cbd5e1;
+  padding: 14px;
+}
+
 @media (max-width: 760px) {
   .page { padding: 14px; }
   .hero, .grid.two-up, .button-row { grid-template-columns: 1fr; display: grid; }
   .hero { gap: 12px; }
-  .kv-list div, .list-item, .event { flex-direction: column; align-items: flex-start; }
+  .section-head, .detail-card-head, .kv-list div, .list-item, .event {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  .field-chip {
+    min-width: 0;
+    flex-basis: calc(50% - 4px);
+  }
   button { width: 100%; }
 }

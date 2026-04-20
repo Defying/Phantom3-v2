@@ -8,7 +8,7 @@ const envSchema = z.object({
   PHANTOM3_V2_DATA_DIR: z.string().default('./data'),
   PHANTOM3_V2_LOG_DIR: z.string().default('./logs'),
   PHANTOM3_V2_MARKET_REFRESH_MS: z.coerce.number().int().positive().default(30000),
-  PHANTOM3_V2_MARKET_LIMIT: z.coerce.number().int().positive().max(20).default(6),
+  PHANTOM3_V2_MARKET_LIMIT: z.coerce.number().int().positive().max(24).default(16),
   PHANTOM3_V2_CONTROL_TOKEN: z.string().min(16, 'PHANTOM3_V2_CONTROL_TOKEN must be at least 16 characters')
 });
 

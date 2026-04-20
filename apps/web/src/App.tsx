@@ -1,14 +1,68 @@
 import { useEffect, useMemo, useState } from 'react';
-import type { RuntimeState } from '../../../packages/contracts/src/index';
+import type { ModuleStatus, RuntimeState } from '../../../packages/contracts/src/index';
 
 const tokenStorageKey = 'phantom3-v2-control-token';
 const compactNumber = new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 1 });
 
+const candidateIntentPaths = [
+  'candidateIntents',
+  'strategy.candidateIntents',
+  'strategy.intents',
+  'strategy.pipeline.candidateIntents'
+] as const;
+
+const riskDecisionPaths = [
+  'riskDecisions',
+  'risk.decisions',
+  'strategy.riskDecisions',
+  'strategy.pipeline.riskDecisions'
+] as const;
+
+const paperPositionPaths = [
+  'paperPositions',
+  'positions',
+  'paper.positions',
+  'paperLedger.positions',
+  'ledger.positions'
+] as const;
+
 type SocketState = 'connecting' | 'live' | 'reconnecting' | 'offline';
+type Tone = ModuleStatus | 'info';
+type LooseRecord = Record<string, unknown>;
 
 type RuntimeEnvelope = {
   type: 'runtime';
   data: RuntimeState;
+};
+
+type DetailField = {
+  label: string;
+  value: string;
+};
+
+type DetailCard = {
+  id: string;
+  title: string;
+  subtitle?: string;
+  badge: string;
+  tone: Tone;
+  fields: DetailField[];
+};
+
+type StrategyPanel = {
+  heading: string;
+  summary: string;
+  badge: string;
+  tone: Tone;
+  fields: DetailField[];
+};
+
+type DetailSectionProps = {
+  eyebrow: string;
+  title: string;
+  subtitle: string;
+  emptyState: string;
+  items: DetailCard[];
 };
 
 async function fetchRuntime(): Promise<RuntimeState> {
@@ -30,6 +84,334 @@ function formatPercent(value: number | null): string {
 
 function formatMaybeMoney(value: number | null): string {
   return value === null ? '...' : compactNumber.format(value);
+}
+
+function defined<T>(value: T | null | undefined): value is T {
+  return value !== null && value !== undefined;
+}
+
+function asRecord(value: unknown): LooseRecord | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? (value as LooseRecord) : null;
+}
+
+function asRecordArray(value: unknown): LooseRecord[] {
+  return Array.isArray(value)
+    ? value.map((entry) => asRecord(entry)).filter(defined)
+    : [];
+}
+
+function resolvePath(source: unknown, path: string): unknown {
+  return path.split('.').reduce<unknown>((current, segment) => {
+    const record = asRecord(current);
+    return record ? record[segment] : undefined;
+  }, source);
+}
+
+function firstPresent(source: unknown, paths: readonly string[]): unknown {
+  for (const path of paths) {
+    const value = resolvePath(source, path);
+    if (value !== undefined && value !== null) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+function readString(source: unknown, paths: readonly string[]): string | null {
+  const value = firstPresent(source, paths);
+  return typeof value === 'string' && value.trim().length ? value : null;
+}
+
+function readNumber(source: unknown, paths: readonly string[]): number | null {
+  const value = firstPresent(source, paths);
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function readStringArray(source: unknown, paths: readonly string[]): string[] {
+  const value = firstPresent(source, paths);
+  return Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0)
+    : [];
+}
+
+function isDateLike(value: string): boolean {
+  return value.includes('T') && !Number.isNaN(Date.parse(value));
+}
+
+function humanizeKey(value: string): string {
+  return value
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^./, (char) => char.toUpperCase());
+}
+
+function formatNumber(value: number): string {
+  if (Math.abs(value) >= 1000) {
+    return compactNumber.format(value);
+  }
+  if (Number.isInteger(value)) {
+    return value.toString();
+  }
+  const digits = Math.abs(value) >= 1 ? 2 : 4;
+  return value.toFixed(digits).replace(/\.0+$/, '').replace(/(\.\d*?)0+$/, '$1');
+}
+
+function formatMoney(value: unknown): string {
+  const amount = typeof value === 'number' && Number.isFinite(value) ? value : null;
+  if (amount === null) {
+    return formatValue(value);
+  }
+  const prefix = amount < 0 ? '-$' : '$';
+  return `${prefix}${formatNumber(Math.abs(amount))}`;
+}
+
+function formatRatio(value: unknown): string {
+  const amount = typeof value === 'number' && Number.isFinite(value) ? value : null;
+  if (amount === null) {
+    return formatValue(value);
+  }
+  if (amount >= 0 && amount <= 1) {
+    return formatPercent(amount);
+  }
+  return formatNumber(amount);
+}
+
+function formatValue(value: unknown): string {
+  if (value === null || value === undefined) {
+    return '';
+  }
+  if (typeof value === 'number') {
+    return formatNumber(value);
+  }
+  if (typeof value === 'boolean') {
+    return value ? 'yes' : 'no';
+  }
+  if (typeof value === 'string') {
+    return isDateLike(value) ? new Date(value).toLocaleString() : value;
+  }
+  if (Array.isArray(value)) {
+    const flattened = value.map((entry) => formatValue(entry)).filter(Boolean);
+    return flattened.join(', ');
+  }
+  const record = asRecord(value);
+  if (record) {
+    const preview = Object.entries(record)
+      .slice(0, 3)
+      .map(([key, entry]) => `${humanizeKey(key)}: ${formatValue(entry)}`)
+      .join(' · ');
+    return preview;
+  }
+  return String(value);
+}
+
+function maybeField(
+  label: string,
+  value: unknown,
+  formatter: (entry: unknown) => string = formatValue
+): DetailField | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  const formatted = formatter(value);
+  return formatted ? { label, value: formatted } : null;
+}
+
+function toneFromValue(value: string | null | undefined): Tone {
+  if (!value) {
+    return 'idle';
+  }
+  const normalized = value.toLowerCase();
+  if (['healthy', 'live', 'running', 'active', 'open', 'approve', 'approved'].some((needle) => normalized.includes(needle))) {
+    return 'healthy';
+  }
+  if (['warning', 'stale', 'degraded', 'resize', 'paused', 'pending', 'review'].some((needle) => normalized.includes(needle))) {
+    return 'warning';
+  }
+  if (['blocked', 'error', 'reject', 'rejected', 'closed', 'flat', 'disabled', 'halted'].some((needle) => normalized.includes(needle))) {
+    return 'blocked';
+  }
+  if (['buy', 'sell', 'yes', 'no', 'long', 'short'].some((needle) => normalized.includes(needle))) {
+    return 'info';
+  }
+  return 'idle';
+}
+
+function buildSubtitle(parts: Array<string | null | undefined>): string | undefined {
+  const values = parts.filter((part): part is string => Boolean(part && part.trim().length));
+  return values.length ? values.join(' · ') : undefined;
+}
+
+function extractArray(source: unknown, paths: readonly string[]): LooseRecord[] {
+  return asRecordArray(firstPresent(source, paths));
+}
+
+function extractStrategyPanel(runtime: RuntimeState | null): StrategyPanel {
+  if (!runtime) {
+    return {
+      heading: 'Loading strategy state',
+      summary: 'Waiting for the runtime payload.',
+      badge: 'loading',
+      tone: 'idle',
+      fields: []
+    };
+  }
+
+  const strategyModule = runtime.modules.find((module) => module.id === 'strategy');
+  const source =
+    asRecord(firstPresent(runtime, ['strategyStatus', 'strategy', 'strategyEngine', 'strategyState'])) ??
+    strategyModule ??
+    null;
+
+  const status =
+    readString(source, ['status', 'state', 'phase', 'mode']) ??
+    strategyModule?.status ??
+    (runtime.paused ? 'paused' : 'observer');
+
+  const fields = [
+    maybeField('Version', readString(source, ['strategyVersion', 'version'])),
+    maybeField('Phase', readString(source, ['phase', 'state', 'mode'])),
+    maybeField('Last update', firstPresent(source, ['updatedAt', 'lastUpdatedAt', 'lastEvaluatedAt', 'lastIntentAt'])),
+    maybeField('Market', readString(source, ['marketId', 'activeMarketId', 'symbol']))
+  ].filter(defined);
+
+  return {
+    heading: readString(source, ['name', 'label']) ?? strategyModule?.name ?? 'Strategy Engine',
+    summary:
+      readString(source, ['summary', 'message', 'note']) ??
+      strategyModule?.summary ??
+      'Strategy payload will appear here when the engine starts publishing state.',
+    badge: status,
+    tone: toneFromValue(status),
+    fields
+  };
+}
+
+function buildCandidateIntentCards(runtime: RuntimeState | null): DetailCard[] {
+  return extractArray(runtime, candidateIntentPaths).slice(0, 6).map((entry, index) => {
+    const question = readString(entry, ['question', 'marketQuestion', 'marketTitle', 'label']);
+    const thesis = readString(entry, ['thesis', 'summary', 'note']);
+    const status = readString(entry, ['status', 'state']);
+    const side = readString(entry, ['side']);
+    const badge = side ?? status ?? 'candidate';
+
+    return {
+      id: readString(entry, ['intentId', 'id']) ?? `candidate-${index}`,
+      title: question ?? thesis ?? `Candidate intent ${index + 1}`,
+      subtitle:
+        (thesis && thesis !== question ? thesis : null) ??
+        buildSubtitle([
+          readString(entry, ['marketId', 'slug']),
+          readString(entry, ['tokenId'])
+        ]),
+      badge,
+      tone: status ? toneFromValue(status) : toneFromValue(side),
+      fields: [
+        maybeField('Intent', readString(entry, ['intentId', 'id'])),
+        maybeField('Market', readString(entry, ['marketId', 'slug'])),
+        maybeField('Token', readString(entry, ['tokenId'])),
+        maybeField('Confidence', firstPresent(entry, ['confidence', 'score', 'probability']), formatRatio),
+        maybeField('Target USD', firstPresent(entry, ['desiredSizeUsd', 'sizeUsd', 'notionalUsd']), formatMoney),
+        maybeField('Target size', firstPresent(entry, ['size', 'requestedSize']), formatValue),
+        maybeField('Max entry', firstPresent(entry, ['maxEntryPrice', 'entryPrice', 'limitPrice']), formatValue),
+        maybeField('Created', firstPresent(entry, ['createdAt', 'at']))
+      ].filter(defined)
+    };
+  });
+}
+
+function buildRiskDecisionCards(runtime: RuntimeState | null): DetailCard[] {
+  return extractArray(runtime, riskDecisionPaths).slice(0, 6).map((entry, index) => {
+    const reasons = readStringArray(entry, ['reasons']);
+    const decision = readString(entry, ['decision', 'status']) ?? 'pending';
+    const question = readString(entry, ['question', 'marketQuestion', 'marketTitle']);
+    const intentId = readString(entry, ['intentId']);
+
+    return {
+      id: readString(entry, ['id', 'intentId']) ?? `risk-${index}`,
+      title: question ?? (intentId ? `Intent ${intentId}` : `Risk decision ${index + 1}`),
+      subtitle: reasons.length ? reasons.join(' · ') : buildSubtitle([readString(entry, ['marketId']), readString(entry, ['note', 'message'])]),
+      badge: decision,
+      tone: toneFromValue(decision),
+      fields: [
+        maybeField('Intent', intentId),
+        maybeField('Market', readString(entry, ['marketId'])),
+        maybeField('Approved USD', firstPresent(entry, ['approvedSizeUsd', 'sizeUsd']), formatMoney),
+        maybeField('Approved size', firstPresent(entry, ['size']), formatValue),
+        maybeField('Created', firstPresent(entry, ['createdAt', 'at']))
+      ].filter(defined)
+    };
+  });
+}
+
+function buildPaperPositionCards(runtime: RuntimeState | null): DetailCard[] {
+  return extractArray(runtime, paperPositionPaths).slice(0, 6).map((entry, index) => {
+    const question = readString(entry, ['question', 'marketQuestion', 'marketTitle', 'label']);
+    const status = readString(entry, ['status']) ?? (readNumber(entry, ['remainingSize']) ? 'open' : 'flat');
+    const side = readString(entry, ['side']);
+
+    return {
+      id: readString(entry, ['lotId', 'positionId', 'id']) ?? `position-${index}`,
+      title: question ?? readString(entry, ['marketId', 'slug']) ?? `Paper position ${index + 1}`,
+      subtitle: buildSubtitle([
+        side,
+        readString(entry, ['tokenId']),
+        readString(entry, ['lotId', 'positionId'])
+      ]),
+      badge: status,
+      tone: toneFromValue(status),
+      fields: [
+        maybeField('Remaining size', firstPresent(entry, ['remainingSize', 'size', 'quantity']), formatValue),
+        maybeField('Avg entry', firstPresent(entry, ['averageEntryPrice', 'entryPrice']), formatValue),
+        maybeField('Realized P&L', firstPresent(entry, ['realizedPnl']), formatMoney),
+        maybeField('Mark', firstPresent(entry, ['unrealizedMark', 'markPrice', 'mark']), formatValue),
+        maybeField('Updated', firstPresent(entry, ['updatedAt', 'closedAt', 'openedAt', 'createdAt']))
+      ].filter(defined)
+    };
+  });
+}
+
+function DetailSection({ eyebrow, title, subtitle, emptyState, items }: DetailSectionProps) {
+  return (
+    <article className="card">
+      <div className="section-head section-head-stack">
+        <div>
+          <p className="eyebrow">{eyebrow}</p>
+          <h2>{title}</h2>
+        </div>
+        <p className="subtle small">{subtitle}</p>
+      </div>
+
+      {items.length ? (
+        <div className="detail-list">
+          {items.map((item) => (
+            <article className="detail-card" key={item.id}>
+              <div className="detail-card-head">
+                <div>
+                  <h3>{item.title}</h3>
+                  {item.subtitle ? <p>{item.subtitle}</p> : null}
+                </div>
+                <span className={`badge ${item.tone}`}>{item.badge}</span>
+              </div>
+              {item.fields.length ? (
+                <div className="field-grid">
+                  {item.fields.map((field) => (
+                    <div className="field-chip" key={`${item.id}-${field.label}`}>
+                      <span>{field.label}</span>
+                      <strong>{field.value}</strong>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+            </article>
+          ))}
+        </div>
+      ) : (
+        <div className="empty-state">{emptyState}</div>
+      )}
+    </article>
+  );
 }
 
 export function App() {
@@ -125,6 +507,11 @@ export function App() {
     return 'healthy';
   }, [runtime]);
 
+  const candidateIntents = useMemo(() => buildCandidateIntentCards(runtime), [runtime]);
+  const riskDecisions = useMemo(() => buildRiskDecisionCards(runtime), [runtime]);
+  const paperPositions = useMemo(() => buildPaperPositionCards(runtime), [runtime]);
+  const strategyPanel = useMemo(() => extractStrategyPanel(runtime), [runtime]);
+
   const sendControl = async (path: '/api/control/pause' | '/api/control/resume') => {
     if (!token) {
       setError('Control token required for write actions.');
@@ -194,6 +581,70 @@ export function App() {
           </div>
         </article>
       </section>
+
+      <section className="card">
+        <div className="section-head section-head-stack">
+          <div>
+            <p className="eyebrow">Strategy pulse</p>
+            <h2>{strategyPanel.heading}</h2>
+          </div>
+          <span className={`status-pill ${strategyPanel.tone}`}>{strategyPanel.badge}</span>
+        </div>
+        <p className="subtle">{strategyPanel.summary}</p>
+        <div className="summary-strip">
+          <div className="summary-tile">
+            <span>Candidate intents</span>
+            <strong>{candidateIntents.length}</strong>
+          </div>
+          <div className="summary-tile">
+            <span>Risk decisions</span>
+            <strong>{riskDecisions.length}</strong>
+          </div>
+          <div className="summary-tile">
+            <span>Paper positions</span>
+            <strong>{paperPositions.length}</strong>
+          </div>
+          <div className="summary-tile">
+            <span>Runtime mode</span>
+            <strong>{runtime?.mode ?? '...'}</strong>
+          </div>
+        </div>
+        {strategyPanel.fields.length ? (
+          <div className="field-grid field-grid-spacious">
+            {strategyPanel.fields.map((field) => (
+              <div className="field-chip" key={field.label}>
+                <span>{field.label}</span>
+                <strong>{field.value}</strong>
+              </div>
+            ))}
+          </div>
+        ) : null}
+      </section>
+
+      <section className="grid two-up">
+        <DetailSection
+          eyebrow="Strategy output"
+          title={`Candidate intents (${candidateIntents.length})`}
+          subtitle={candidateIntents.length ? 'Latest strategy ideas that reached the dashboard.' : 'This list stays empty until the strategy payload publishes candidate intents.'}
+          emptyState="No candidate intents in the current runtime payload yet. When the strategy engine starts emitting them, they will appear here automatically."
+          items={candidateIntents}
+        />
+        <DetailSection
+          eyebrow="Risk gate"
+          title={`Risk decisions (${riskDecisions.length})`}
+          subtitle={riskDecisions.length ? 'Latest approve, reject, or resize outcomes from the risk layer.' : 'This list stays empty until the runtime payload includes risk decisions.'}
+          emptyState="No risk decisions are present yet. Approved, rejected, or resized intents will render here once the risk layer starts publishing them."
+          items={riskDecisions}
+        />
+      </section>
+
+      <DetailSection
+        eyebrow="Paper ledger"
+        title={`Paper positions (${paperPositions.length})`}
+        subtitle={paperPositions.length ? 'Open or recently updated paper positions from the runtime payload.' : 'The dashboard is ready for paper positions as soon as the runtime starts exposing them.'}
+        emptyState="No paper positions are available yet. Position lots or paper holdings will appear here once they are added to runtime state."
+        items={paperPositions}
+      />
 
       <section className="card">
         <div className="section-head">
