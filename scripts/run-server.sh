@@ -4,6 +4,7 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PAT
 ROOT="/Volumes/Carve/Projects/Phantom3-v2"
 cd "$ROOT"
 mkdir -p logs data
+print -r -- $$ > logs/server.pid
 if [[ ! -d node_modules ]]; then
   npm install
 fi
