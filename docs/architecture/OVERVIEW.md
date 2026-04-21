@@ -8,6 +8,9 @@ This repo is the first executable milestone of the Phantom3 v2 rebuild.
 - read-only Polymarket market snapshot adapter
 - paper-safe snapshot strategy signal engine
 - pure paper-trading risk evaluation module
+- append-only paper ledger and paper execution adapter
+- runtime wiring for paper entries plus reduce-only paper exits
+- typed runtime exposure for open-position paper exit state
 - bounded pause/resume control API
 - fail-closed defaults
 - modular repo layout
@@ -15,11 +18,9 @@ This repo is the first executable milestone of the Phantom3 v2 rebuild.
 
 ## Still pending
 
-- append-only paper ledger
-- strategy engine runtime wiring into the worker/runtime loop
-- paper execution adapter
 - replay / comparison harness
 - live execution adapter
+- richer strategy history, depth, and portfolio-aware sizing
 
 ## Next milestone pack
 

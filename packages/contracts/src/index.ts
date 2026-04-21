@@ -85,10 +85,23 @@ export const paperIntentSummarySchema = z.object({
   marketId: z.string(),
   marketQuestion: z.string(),
   side: z.enum(['yes', 'no']),
+  kind: z.enum(['entry', 'exit']),
+  executionSide: z.enum(['buy', 'sell']),
+  reduceOnly: z.boolean(),
   status: z.enum(['draft', 'watching', 'submitted', 'closed']),
   createdAt: z.string(),
   thesis: z.string(),
   desiredSizeUsd: z.number().nonnegative(),
+  positionId: z.string().nullable(),
+  trigger: z.enum([
+    'take-profit-hit',
+    'stop-loss-hit',
+    'latest-exit-reached',
+    'spread-invalidated',
+    'complement-invalidated',
+    'expiry-window'
+  ]).nullable(),
+  limitPrice: z.number().min(0).max(1).nullable(),
   maxEntryPrice: z.number().min(0).max(1).nullable()
 });
 export type PaperIntentSummary = z.infer<typeof paperIntentSummarySchema>;
@@ -98,12 +111,42 @@ export const riskDecisionSummarySchema = z.object({
   intentId: z.string(),
   marketId: z.string(),
   question: z.string(),
+  kind: z.enum(['entry', 'exit']),
+  reduceOnly: z.boolean(),
   decision: z.enum(['approve', 'reject', 'resize', 'block']),
   approvedSizeUsd: z.number().nonnegative(),
   createdAt: z.string(),
   reasons: z.array(z.string())
 });
 export type RiskDecisionSummary = z.infer<typeof riskDecisionSummarySchema>;
+
+export const paperExitTriggerSchema = z.enum([
+  'take-profit-hit',
+  'stop-loss-hit',
+  'latest-exit-reached',
+  'spread-invalidated',
+  'complement-invalidated',
+  'expiry-window'
+]);
+export type PaperExitTrigger = z.infer<typeof paperExitTriggerSchema>;
+
+export const paperPositionExitSchema = z.object({
+  status: z.enum(['armed', 'triggered', 'submitted']),
+  triggers: z.array(paperExitTriggerSchema),
+  evaluatedAt: z.string(),
+  summary: z.string(),
+  takeProfitPrice: z.number().min(0).max(1).nullable(),
+  stopLossPrice: z.number().min(0).max(1).nullable(),
+  latestExitAt: z.string().nullable(),
+  invalidateIfSpreadAbove: z.number().min(0).max(1).nullable(),
+  invalidateIfComplementDriftAbove: z.number().nonnegative().nullable(),
+  invalidateIfHoursToExpiryBelow: z.number().nonnegative().nullable(),
+  recommendedQuantity: z.number().nonnegative(),
+  recommendedSizeUsd: z.number().nonnegative(),
+  recommendedLimitPrice: z.number().min(0).max(1).nullable(),
+  submittedIntentId: z.string().nullable()
+});
+export type PaperPositionExit = z.infer<typeof paperPositionExitSchema>;
 
 export const paperPositionSummarySchema = z.object({
   id: z.string(),
@@ -116,7 +159,8 @@ export const paperPositionSummarySchema = z.object({
   markPrice: z.number().min(0).max(1).nullable(),
   unrealizedPnlUsd: z.number().nullable(),
   openedAt: z.string(),
-  status: z.enum(['open', 'closed'])
+  status: z.enum(['open', 'closed']),
+  exit: paperPositionExitSchema.nullable()
 });
 export type PaperPositionSummary = z.infer<typeof paperPositionSummarySchema>;
 
