@@ -117,15 +117,15 @@ export function createEntryIntentSummary(
   intent: PaperTradeIntent,
   status: PaperIntentSummary['status'],
   desiredSizeUsd: number,
-  id = createRuntimeIntentId(intent)
+  options: { id?: string; createdAt?: string } = {}
 ): PaperIntentSummary {
   return {
-    id,
+    id: options.id ?? createRuntimeIntentId(intent),
     marketId: intent.marketId,
     marketQuestion: intent.question,
     side: intent.side,
     status,
-    createdAt: intent.generatedAt,
+    createdAt: options.createdAt ?? intent.generatedAt,
     thesis: intent.thesis.summary,
     desiredSizeUsd: round(desiredSizeUsd, 2),
     maxEntryPrice: intent.entry.acceptablePriceBand.max

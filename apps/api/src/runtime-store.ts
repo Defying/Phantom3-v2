@@ -465,6 +465,9 @@ export class RuntimeStore {
 
     const riskDecisions: RiskDecisionSummary[] = [];
     const intentSummaries: PaperIntentSummary[] = [];
+    const previousIntents = new Map(
+      this.currentStrategyPayload().intents.map((summary) => [`${summary.marketId}:${summary.side}`, summary] as const)
+    );
     let submittedCount = 0;
 
     for (const intent of report.intents) {
@@ -501,9 +504,12 @@ export class RuntimeStore {
 
       riskDecisions.push(this.buildRiskDecisionSummary(draftDecision, intent));
 
+      const previousSummary = previousIntents.get(`${intent.marketId}:${intent.side}`) ?? null;
       let status: PaperIntentSummary['status'] = draftDecision.decision === 'approve' || draftDecision.decision === 'resize'
         ? 'watching'
         : 'draft';
+      let summaryId = previousSummary?.id;
+      let summaryCreatedAt = previousSummary?.createdAt;
 
       if (quote && (draftDecision.decision === 'approve' || draftDecision.decision === 'resize') && this.shouldSubmitEntry(projection, market.id, tokenId, snapshot.fetchedAt)) {
         const approvedIntent = this.createApprovedEntryIntent({
@@ -520,6 +526,8 @@ export class RuntimeStore {
           positions = this.projectionPositionsToSummaries(projection, marketMap);
           riskPositions = positions.map(createRiskPositionSnapshot);
           status = 'submitted';
+          summaryId = approvedIntent.intentId;
+          summaryCreatedAt = approvedIntent.approvedAt;
           submittedCount += 1;
         }
       }
@@ -529,7 +537,10 @@ export class RuntimeStore {
           intent,
           status,
           draftDecision.approvedSizeUsd > 0 ? draftDecision.approvedSizeUsd : intent.suggestedNotionalUsd,
-          createRuntimeIntentId(intent)
+          {
+            id: summaryId,
+            createdAt: summaryCreatedAt
+          }
         )
       );
     }
