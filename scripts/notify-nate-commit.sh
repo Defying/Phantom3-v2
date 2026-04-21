@@ -48,7 +48,7 @@ if [[ "${PHANTOM3_NOTIFY_DRY_RUN:-0}" == "1" ]]; then
   exit 0
 fi
 
-/usr/bin/osascript <<'APPLESCRIPT' "$recipient" "$message"
+/usr/bin/osascript - "$recipient" "$message" <<'APPLESCRIPT'
 on run argv
   set targetHandle to item 1 of argv
   set targetMessage to item 2 of argv
