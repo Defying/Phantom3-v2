@@ -16,7 +16,8 @@
     "runtime:status": "./scripts/phantom3-runtime.sh status",
     "runtime:logs": "./scripts/phantom3-runtime.sh logs",
     "runtime:launchd:print": "./scripts/phantom3-runtime.sh launchd-print",
-    "verify:paper-safe": "node scripts/verify-paper-safe.mjs"
+    "verify:paper-safe": "node scripts/verify-paper-safe.mjs",
+    "verify:paper-runtime": "tsx scripts/verify-paper-runtime.ts"
   },
   "dependencies": {
     "@fastify/static": "^8.3.0",

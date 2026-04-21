@@ -32,7 +32,9 @@ Not implemented yet:
 ```bash
 cp .env.example .env
 # set a real PHANTOM3_V2_CONTROL_TOKEN first
+npm install
 npm run runtime:preflight
+npm run verify:paper-runtime
 npm run runtime:start
 npm run runtime:status
 ```
@@ -108,6 +110,7 @@ Notes:
 - do **not** expose this app to the public internet, keep it on localhost, LAN, or a trusted private tunnel
 - live mode is not implemented in this bootstrap
 - a passing `npm run verify:paper-safe` only confirms static guardrails and docs markers, not trading safety or readiness
+- `npm run verify:paper-runtime` is a local smoke test for ledger projection invariants, bootstrap restart truth, and the sanitized paper API shape
 
 ## Repo layout
 
@@ -128,6 +131,7 @@ docs/
   runbooks/
 scripts/
   phantom3-runtime.sh  local runtime helper (preflight/start/stop/status/logs/launchd-print)
+  verify-paper-runtime.ts
   verify-paper-safe.mjs
   launchd/
     io.phantom3.v2.paper-runtime.plist.template

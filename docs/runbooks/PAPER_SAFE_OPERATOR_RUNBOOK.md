@@ -40,7 +40,9 @@ Before starting a session:
 ```bash
 cp .env.example .env
 # set a fresh PHANTOM3_V2_CONTROL_TOKEN before continuing
+npm install
 npm run runtime:preflight
+npm run verify:paper-runtime
 npm run runtime:start
 npm run runtime:status
 ```
@@ -52,6 +54,7 @@ What the helper does:
 - checks `/api/health` instead of trusting a stale pid file
 
 Then confirm:
+- `npm run verify:paper-runtime` passed on the same commit you are about to run
 - `/api/health` returns healthy JSON
 - `/api/runtime` reports `mode: "paper"`
 - the runtime shows the execution path as blocked or disarmed

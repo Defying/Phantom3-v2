@@ -14,7 +14,7 @@ import type {
   StrategyStateSnapshot,
   WatchEntry
 } from '../../../packages/contracts/src/index.js';
-import { strategyStateSnapshotSchema } from '../../../packages/contracts/src/index.js';
+import { strategyRuntimeSummarySchema, strategyStateSnapshotSchema } from '../../../packages/contracts/src/index.js';
 import { getOpenOrders, JsonlLedger, positionKeyFor } from '../../../packages/ledger/src/index.js';
 import { fetchTopMarkets, type MarketSnapshot } from '../../../packages/market-data/src/index.js';
 import { PaperExecutionAdapter, type ApprovedTradeIntent } from '../../../packages/paper-execution/src/index.js';
@@ -213,15 +213,24 @@ export class RuntimeStore {
     await mkdir(this.config.logDir, { recursive: true });
     await this.ledger.init();
 
+    let reloadedPersistedState = false;
+
     try {
       const raw = await readFile(this.statePath, 'utf8');
       const existing = JSON.parse(raw) as PersistedRuntimeState;
       this.strategySnapshots = this.hydrateStrategySnapshots(existing.strategySnapshots);
       this.state = this.hydrateState(existing);
-      this.syncStrategyState('bootstrap', this.currentStrategyPayload(), { recordSnapshot: this.strategySnapshots.length === 0 });
-      this.pushEvent('info', 'Reloaded persisted bootstrap state.');
+      reloadedPersistedState = true;
     } catch {
-      this.syncStrategyState('bootstrap', this.currentStrategyPayload());
+      this.state = createInitialState(this.config);
+    }
+
+    const bootstrapPayload = await this.restoreLedgerTruth(this.currentStrategyPayload());
+    this.syncStrategyState('bootstrap', bootstrapPayload, { recordSnapshot: this.strategySnapshots.length === 0 });
+
+    if (reloadedPersistedState) {
+      this.pushEvent('info', 'Reloaded persisted bootstrap state.');
+    } else {
       await this.persist();
     }
 
@@ -286,7 +295,7 @@ export class RuntimeStore {
 
   private hydrateState(existing: PersistedRuntimeState): RuntimeState {
     const base = createInitialState(this.config);
-    const { strategySnapshots: _strategySnapshots, strategy: _strategy, ...rest } = existing;
+    const { strategySnapshots: _strategySnapshots, strategy, ...rest } = existing;
     const marketData = {
       ...base.marketData,
       ...(typeof existing.marketData === 'object' && existing.marketData ? existing.marketData : {}),
@@ -307,10 +316,12 @@ export class RuntimeStore {
       events
     } satisfies RuntimeState;
 
+    const persistedStrategy = strategyRuntimeSummarySchema.safeParse(strategy);
+
     hydratedState.strategy = createStrategyRuntimeSummary(
       hydratedState,
       this.strategySnapshots,
-      this.currentStrategyPayload(base.strategy)
+      this.currentStrategyPayload(persistedStrategy.success ? persistedStrategy.data : base.strategy)
     );
     hydratedState.modules = buildModules(hydratedState);
     hydratedState.watchlist = buildWatchlist(hydratedState);
@@ -418,6 +429,56 @@ export class RuntimeStore {
     return [...projection.positions.values()]
       .map((position) => createPaperPositionSummary(position, marketMap.get(position.marketId) ?? null))
       .filter((position): position is NonNullable<typeof position> => Boolean(position));
+  }
+
+  private latestLedgerRecordedAt(projection: Awaited<ReturnType<JsonlLedger['readProjection']>>): string | null {
+    const timestamps = [
+      ...[...projection.intents.values()].map((intent) => intent.recordedAt),
+      ...[...projection.orders.values()].map((order) => order.updatedAt),
+      ...projection.fills.map((fill) => fill.recordedAt),
+      ...projection.positionEvents.map((event) => event.recordedAt)
+    ];
+
+    return timestamps.reduce<string | null>((latest, candidate) => {
+      if (!candidate) {
+        return latest;
+      }
+      if (!latest || candidate > latest) {
+        return candidate;
+      }
+      return latest;
+    }, null);
+  }
+
+  private async restoreLedgerTruth(payload: StrategyEvaluationPayload): Promise<StrategyEvaluationPayload> {
+    const projection = await this.ledger.readProjection();
+    if (projection.latestSequence === 0) {
+      return payload;
+    }
+
+    const positions = this.projectionPositionsToSummaries(projection, this.marketMap());
+    const restoredNotes = (payload.notes ?? []).filter(
+      (note) => !note.startsWith('Recovered ') && !note.startsWith('Ledger projection reported ')
+    );
+
+    if (positions.length > 0) {
+      restoredNotes.unshift(
+        `Recovered ${positions.length} open paper position${positions.length === 1 ? '' : 's'} from append-only ledger truth during bootstrap.`
+      );
+    }
+
+    if (projection.anomalies.length > 0) {
+      restoredNotes.unshift(
+        `Ledger projection reported ${projection.anomalies.length} bootstrap anomal${projection.anomalies.length === 1 ? 'y' : 'ies'}: ${projection.anomalies.join('; ')}`
+      );
+    }
+
+    return {
+      ...payload,
+      positions,
+      notes: restoredNotes,
+      lastEvaluatedAt: this.latestLedgerRecordedAt(projection) ?? payload.lastEvaluatedAt ?? null
+    };
   }
 
   private createApprovedEntryIntent(input: {
