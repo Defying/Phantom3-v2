@@ -25,6 +25,8 @@ const integerFormatter = new Intl.NumberFormat('en-US', { maximumFractionDigits:
 
 type SocketState = 'connecting' | 'live' | 'reconnecting' | 'offline';
 type Tone = 'healthy' | 'warning' | 'idle' | 'blocked' | 'info' | 'long' | 'short';
+type TradingPreferenceOption = RuntimeState['tradingPreference']['selected'];
+type StrategyRouting = NonNullable<RuntimeState['strategy']['routing']>;
 
 type RuntimeEnvelope = { type: 'runtime'; data: RuntimeState } | { type: 'pong'; at: string };
 
@@ -117,6 +119,26 @@ function strategyStatusTone(status: string): Tone {
   if (status === 'paused') return 'warning';
   if (status === 'degraded') return 'short';
   return 'idle';
+}
+
+function tradingPreferenceTone(option: TradingPreferenceOption): Tone {
+  return option.parityStatus === 'current-runtime' ? 'long' : 'warning';
+}
+
+function strategyRoutingTone(routing: StrategyRouting | null | undefined): Tone {
+  return routing?.executionMode === 'paper-active' ? 'long' : 'warning';
+}
+
+function strategyEntryPolicyTone(routing: StrategyRouting | null | undefined): Tone {
+  return routing?.entryPolicy === 'emit-new-entries' ? 'long' : 'warning';
+}
+
+function formatSelectionMode(value: string | null | undefined): string {
+  if (!value) return '—';
+  return value
+    .split('-')
+    .map((part) => (part.length <= 3 ? part.toUpperCase() : part[0].toUpperCase() + part.slice(1)))
+    .join(' ');
 }
 
 function truncate(value: string, max = 140): string {
@@ -498,6 +520,7 @@ function StrategyAndCandidates({ runtime }: { runtime: RuntimeState | null }) {
   const strategy = runtime?.strategy;
   if (!strategy) return null;
   const candidates = strategy.candidates ?? [];
+  const routing = strategy.routing ?? null;
   const statusTone = runtime.paused ? 'warning' : strategyStatusTone(strategy.status);
 
   return (
@@ -510,24 +533,46 @@ function StrategyAndCandidates({ runtime }: { runtime: RuntimeState | null }) {
         <span className={`pill pill-${statusTone}`}>{runtime.paused ? 'paused' : strategy.status}</span>
       </header>
       <p className="panel-summary">{strategy.summary}</p>
+      {routing ? (
+        <div className={`strategy-route-card ${routing.executionMode === 'reference-only' ? 'is-reference' : 'is-active'}`}>
+          <div className="strategy-route-head">
+            <strong>{routing.requestedLabel}</strong>
+            <div className="strategy-route-badges">
+              <span className={`chip-xs chip-${strategyRoutingTone(routing)}-ghost`}>
+                {routing.executionMode === 'paper-active' ? 'active runtime' : 'reference only'}
+              </span>
+              <span className={`chip-xs chip-${strategyEntryPolicyTone(routing)}-ghost`}>
+                {routing.entryPolicy === 'emit-new-entries' ? 'new entries on' : 'manage open only'}
+              </span>
+            </div>
+          </div>
+          <p className="subtle small">{routing.summary}</p>
+          <div className="strategy-route-meta">
+            <span>evaluating with <strong>{routing.evaluatedLabel}</strong></span>
+            <span>selection mode <strong>{formatSelectionMode(routing.selectionMode)}</strong></span>
+            <span>strategy <strong className="num">{routing.strategyId}</strong></span>
+            <span>version <strong className="num">{routing.strategyVersion}</strong></span>
+          </div>
+        </div>
+      ) : null}
       <div className="strategy-kv">
-        <div><span>Version</span><strong className="num">{strategy.strategyVersion}</strong></div>
         <div><span>Mode</span><strong>{strategy.mode}</strong></div>
         <div><span>Watching</span><strong className="num">{strategy.watchedMarketCount}</strong></div>
         <div><span>Candidates</span><strong className="num">{strategy.candidateCount}</strong></div>
         <div><span>Intents</span><strong className="num">{strategy.openIntentCount}</strong></div>
         <div><span>Exposure</span><strong className="num">{formatUsd(strategy.openExposureUsd)}</strong></div>
+        <div><span>Version</span><strong className="num">{strategy.strategyVersion}</strong></div>
       </div>
       {strategy.notes.length ? (
         <ul className="strategy-notes">
-          {strategy.notes.slice(0, 4).map((note, idx) => (
+          {strategy.notes.slice(0, 5).map((note, idx) => (
             <li key={idx}>{note}</li>
           ))}
         </ul>
       ) : null}
       <div className="panel-sub">
         <header className="panel-sub-head">
-          <p className="eyebrow">Candidates</p>
+          <p className="eyebrow">{routing?.executionMode === 'reference-only' ? 'Baseline candidates' : 'Candidates'}</p>
           <span className="panel-count num">{candidates.length}</span>
         </header>
         {candidates.length ? (
@@ -537,7 +582,11 @@ function StrategyAndCandidates({ runtime }: { runtime: RuntimeState | null }) {
             ))}
           </div>
         ) : (
-          <p className="subtle small">No candidates scored yet.</p>
+          <p className="subtle small">
+            {routing?.executionMode === 'reference-only'
+              ? 'No baseline candidates are visible yet.'
+              : 'No candidates scored yet.'}
+          </p>
         )}
       </div>
     </section>
@@ -600,6 +649,7 @@ function ControlsPanel({
   busy,
   loading,
   sendControl,
+  saveTradingPreference,
   runtime,
   socketState
 }: {
@@ -608,9 +658,15 @@ function ControlsPanel({
   busy: boolean;
   loading: boolean;
   sendControl: (path: '/api/control/pause' | '/api/control/resume') => Promise<void> | void;
+  saveTradingPreference: (profile: TradingPreferenceOption['profile']) => Promise<void> | void;
   runtime: RuntimeState | null;
   socketState: SocketState;
 }) {
+  const tradingPreference = runtime?.tradingPreference;
+  const selectedPreference = tradingPreference?.selected ?? null;
+  const availablePreferences = tradingPreference?.available ?? [];
+  const routing = runtime?.strategy.routing ?? null;
+
   return (
     <section className="panel panel-controls" aria-label="Controls and access">
       <header className="panel-head">
@@ -626,7 +682,7 @@ function ControlsPanel({
         <span>Control token</span>
         <input
           type="password"
-          placeholder="Paste token to enable pause/resume"
+          placeholder="Paste token to enable controls and save preference"
           value={token}
           onChange={(event) => setToken(event.target.value)}
           autoComplete="off"
@@ -648,12 +704,93 @@ function ControlsPanel({
           Resume
         </button>
       </div>
+
+      <div className="control-divider" />
+
+      <div className="preference-header">
+        <div>
+          <p className="mini-eyebrow">Trading preference</p>
+          <h3>{selectedPreference?.label ?? 'No preference selected'}</h3>
+        </div>
+        {selectedPreference ? (
+          <span className={`pill pill-${routing ? strategyRoutingTone(routing) : tradingPreferenceTone(selectedPreference)} pill-ghost`}>
+            {routing
+              ? routing.executionMode === 'paper-active'
+                ? 'active runtime'
+                : 'reference only'
+              : selectedPreference.parityStatus === 'current-runtime'
+                ? 'active runtime'
+                : 'reference only'}
+          </span>
+        ) : null}
+      </div>
+      {selectedPreference ? <p className="subtle small">{selectedPreference.note}</p> : null}
+      {routing ? (
+        <div className={`preference-route-note ${routing.executionMode === 'reference-only' ? 'is-reference' : 'is-active'}`}>
+          <div className="preference-route-head">
+            <strong>{routing.summary}</strong>
+            <span className={`chip-xs chip-${strategyEntryPolicyTone(routing)}-ghost`}>
+              {routing.entryPolicy === 'emit-new-entries' ? 'new entries enabled' : 'manage open positions only'}
+            </span>
+          </div>
+          <p className="subtle small">{routing.note}</p>
+          <div className="preference-route-meta">
+            <span>requested <strong>{routing.requestedLabel}</strong></span>
+            <span>evaluating <strong>{routing.evaluatedLabel}</strong></span>
+            <span>mode <strong>{formatSelectionMode(routing.selectionMode)}</strong></span>
+          </div>
+        </div>
+      ) : null}
+      <div className="preference-list">
+        {availablePreferences.map((option) => {
+          const selected = option.profile === selectedPreference?.profile;
+          const tone = tradingPreferenceTone(option);
+          return (
+            <article className={`preference-card ${selected ? 'is-selected' : ''}`} key={option.profile}>
+              <div className="preference-card-head">
+                <div>
+                  <strong>{option.label}</strong>
+                  <p className="subtle small">{option.summary}</p>
+                </div>
+                <span className={`chip-xs chip-${tone}-ghost`}>
+                  {selected
+                    ? routing
+                      ? routing.executionMode === 'paper-active'
+                        ? 'selected · active'
+                        : 'selected · reference'
+                      : option.parityStatus === 'current-runtime'
+                        ? 'selected · active'
+                        : 'selected · reference'
+                    : option.parityStatus === 'current-runtime'
+                      ? 'runtime'
+                      : 'reference'}
+                </span>
+              </div>
+              <p className="subtle small">{option.note}</p>
+              <div className="preference-meta">
+                <span>{option.intendedMarkets.join(' · ')}</span>
+                <span>{option.intendedTimeframes.join(' · ')}</span>
+              </div>
+              <button
+                className={`btn ${selected ? 'btn-secondary' : 'btn-primary'}`}
+                disabled={busy || loading || !token || selected}
+                onClick={() => void saveTradingPreference(option.profile)}
+              >
+                {selected ? 'Selected' : 'Use this profile'}
+              </button>
+            </article>
+          );
+        })}
+      </div>
+
       <p className="subtle small">
-        Paper-only runtime. Controls flip strategy evaluation on/off. No real exchange writes are performed.
+        Paper-only runtime. Controls flip strategy evaluation on or off. Preference selection now routes through an explicit profile layer so the dashboard can show when a profile is active versus reference-only.
       </p>
       <div className="access-kv">
         <div><span>Public URL</span><strong>{runtime?.publicBaseUrl ?? '—'}</strong></div>
         <div><span>Transport</span><strong>WebSocket · {socketState}</strong></div>
+        <div><span>Entry policy</span><strong>{routing ? (routing.entryPolicy === 'emit-new-entries' ? 'emit new paper entries' : 'manage open positions only') : '—'}</strong></div>
+        <div><span>Evaluator</span><strong>{routing?.evaluatedLabel ?? '—'}</strong></div>
         <div><span>Heartbeat</span><strong className="num">{runtime?.lastHeartbeatAt ? new Date(runtime.lastHeartbeatAt).toLocaleTimeString() : '—'}</strong></div>
       </div>
     </section>
@@ -863,6 +1000,35 @@ export function App() {
     }
   };
 
+  const saveTradingPreference = async (profile: TradingPreferenceOption['profile']) => {
+    if (!token) {
+      setError('Control token required for write actions.');
+      return;
+    }
+    setBusy(true);
+    try {
+      const response = await fetch('/api/control/trading-preference', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-phantom3-token': token
+        },
+        body: JSON.stringify({ profile })
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({} as { error?: string }));
+        throw new Error(payload.error || 'Trading preference update failed');
+      }
+      const next = await fetchRuntime();
+      setRuntime(next);
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Trading preference update failed');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div className="app-shell">
       <StatusBar runtime={runtime} socketState={socketState} />
@@ -891,6 +1057,7 @@ export function App() {
             busy={busy}
             loading={loading}
             sendControl={sendControl}
+            saveTradingPreference={saveTradingPreference}
             runtime={runtime}
             socketState={socketState}
           />

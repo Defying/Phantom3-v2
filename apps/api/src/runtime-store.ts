@@ -14,15 +14,30 @@ import type {
   RuntimeState,
   StrategyRuntimeSummary,
   StrategyStateSnapshot,
+  TradingPreferenceOption,
+  TradingPreferenceProfile,
+  TradingPreferenceState,
   WatchEntry
 } from '../../../packages/contracts/src/index.js';
-import { strategyRuntimeSummarySchema, strategyStateSnapshotSchema } from '../../../packages/contracts/src/index.js';
+import { strategyRuntimeSummarySchema, strategyStateSnapshotSchema, tradingPreferenceStateSchema } from '../../../packages/contracts/src/index.js';
 import { getOpenOrders, JsonlLedger, positionKeyFor, type IntentApprovedEvent, type LedgerProjection, type ProjectedOrder, type ProjectedPosition } from '../../../packages/ledger/src/index.js';
 import { describePolymarketAccess, describePolymarketTransport, fetchTopMarkets, type MarketSnapshot } from '../../../packages/market-data/src/index.js';
 import { PaperExecutionAdapter, type ApprovedTradeIntent } from '../../../packages/paper-execution/src/index.js';
 import { OutboundTransport } from '../../../packages/transport/src/index.js';
-import { createPaperRiskConfig, evaluatePaperTradeRisk, type PaperRiskDecision } from '../../../packages/risk/src/index.js';
-import { buildStrategySignalReport, type BinarySide, type PaperTradeIntent, type StrategyExitConstraints } from '../../../packages/strategy/src/index.js';
+import { createPaperRiskConfig, evaluatePaperTradeRisk, type PaperRiskDecision, type RiskHooks } from '../../../packages/risk/src/index.js';
+import {
+  buildStrategySignalReport,
+  createStrategyEngineOptionsForProfile,
+  createTradingPreferenceOptions,
+  evaluateLegacyManagedExit,
+  evaluateLegacyManagedSessionGuards,
+  resolveStrategyRuntimeRoute,
+  type BinarySide,
+  type LegacyManagedExitState,
+  type LegacyManagedSessionGuardState,
+  type PaperTradeIntent,
+  type StrategyExitConstraints
+} from '../../../packages/strategy/src/index.js';
 import {
   MAX_STRATEGY_SNAPSHOTS,
   buildPaperStrategyView,
@@ -64,6 +79,10 @@ function formatProbability(value: number | null): string {
   return value == null ? 'n/a' : round(value, 4).toFixed(4);
 }
 
+function formatUsd(value: number | null): string {
+  return value == null ? 'n/a' : `$${round(value, 2).toFixed(2)}`;
+}
+
 function formatExitTrigger(trigger: PaperExitTrigger): string {
   switch (trigger) {
     case 'take-profit-hit':
@@ -78,6 +97,18 @@ function formatExitTrigger(trigger: PaperExitTrigger): string {
       return 'complement drift invalidated the setup';
     case 'expiry-window':
       return 'expiry window reached';
+    case 'managed-target-hit':
+      return 'managed target hit';
+    case 'managed-stop-hit':
+      return 'managed stop hit';
+    case 'managed-trailing-stop':
+      return 'managed trailing stop fired';
+    case 'managed-break-even':
+      return 'damaged trade recovered to break even';
+    case 'managed-time-decay-profit':
+      return 'time-decay profit exit fired';
+    case 'managed-market-closing':
+      return 'forced exit into the close';
     default: {
       const exhaustiveCheck: never = trigger;
       return exhaustiveCheck;
@@ -111,6 +142,34 @@ function complementDrift(market: RuntimeMarket): number | null {
     return null;
   }
   return Math.abs(1 - (market.yesPrice + market.noPrice));
+}
+
+function isLegacyManagedExitProfile(profile: TradingPreferenceProfile): boolean {
+  return profile === 'legacy-early-exit-live';
+}
+
+function sessionGuardToRiskHooks(sessionGuard: LegacyManagedSessionGuardState): RiskHooks | undefined {
+  if (sessionGuard.status === 'blocked') {
+    return {
+      killSwitch: {
+        global: {
+          active: true,
+          reason: sessionGuard.reasons.map((reason) => reason.message).join(' '),
+          triggeredAt: sessionGuard.lastClosedTradeAt ?? isoNow()
+        }
+      }
+    };
+  }
+
+  if (sessionGuard.status === 'cooldown' && sessionGuard.cooldownUntil) {
+    return {
+      cooldowns: {
+        globalUntil: sessionGuard.cooldownUntil
+      }
+    };
+  }
+
+  return undefined;
 }
 
 function strategyModuleStatus(strategy: StrategyRuntimeSummary): RuntimeModule['status'] {
@@ -208,6 +267,15 @@ function venueAccessWatchNote(state: RuntimeState): string {
   return `${state.marketData.access.note} ${state.marketData.transport.note}`;
 }
 
+function buildTradingPreferenceState(profile: TradingPreferenceProfile = 'current-v2-generic'): TradingPreferenceState {
+  const available: TradingPreferenceOption[] = createTradingPreferenceOptions();
+  const selected = available.find((entry) => entry.profile === profile) ?? available[0];
+  return {
+    selected,
+    available
+  };
+}
+
 function buildModules(state: RuntimeState): RuntimeModule[] {
   return [
     { id: 'config', name: 'Config Gate', status: 'healthy', summary: 'Environment parsed, remote controls token-gated.' },
@@ -244,6 +312,8 @@ function buildModules(state: RuntimeState): RuntimeModule[] {
 }
 
 function buildWatchlist(state: RuntimeState): WatchEntry[] {
+  const route = resolveStrategyRuntimeRoute(state.tradingPreference.selected.profile);
+
   return [
     {
       id: 'market-snapshot',
@@ -270,6 +340,12 @@ function buildWatchlist(state: RuntimeState): WatchEntry[] {
       note: state.strategy.summary
     },
     {
+      id: 'trading-preference',
+      label: 'Trading preference',
+      status: 'active',
+      note: `${route.summary} ${route.note}`
+    },
+    {
       id: 'paper-ledger',
       label: 'Paper ledger truth',
       status: 'active',
@@ -293,28 +369,10 @@ function createInitialState(config: AppConfig): RuntimeState {
     paused: false,
     remoteDashboardEnabled: config.remoteDashboardEnabled,
     publicBaseUrl: config.publicBaseUrl,
+    tradingPreference: buildTradingPreferenceState(),
     marketData,
     markets: [],
-    strategy: {
-      engineId: 'paper-strategy-runtime',
-      strategyVersion: 'paper-signal-v1',
-      mode: 'paper',
-      status: 'idle',
-      safeToExpose: true,
-      lastEvaluatedAt: null,
-      lastSnapshotAt: null,
-      watchedMarketCount: 0,
-      candidateCount: 0,
-      openIntentCount: 0,
-      openPositionCount: 0,
-      openExposureUsd: 0,
-      summary: 'Paper strategy runtime is waiting on fresh market data before evaluation.',
-      candidates: [],
-      intents: [],
-      riskDecisions: [],
-      positions: [],
-      notes: ['Paper-only runtime. No real exchange writes are performed.']
-    },
+    strategy: {} as StrategyRuntimeSummary,
     modules: [] as RuntimeModule[],
     watchlist: [] as WatchEntry[],
     events: [
@@ -324,6 +382,14 @@ function createInitialState(config: AppConfig): RuntimeState {
     ]
   } satisfies RuntimeState;
 
+  state.strategy = createStrategyRuntimeSummary(state, [], {
+    report: null,
+    intents: [],
+    riskDecisions: [],
+    positions: [],
+    notes: ['Paper-only runtime. No real exchange writes are performed.'],
+    lastEvaluatedAt: null
+  });
   state.modules = buildModules(state);
   state.watchlist = buildWatchlist(state);
   return state;
@@ -420,6 +486,25 @@ export class RuntimeStore {
     this.pushEvent('info', paused ? 'Operator paused the runtime.' : 'Operator resumed the runtime.');
   }
 
+  setTradingPreference(profile: TradingPreferenceProfile): TradingPreferenceState {
+    if (this.state.tradingPreference.selected.profile === profile) {
+      return structuredClone(this.state.tradingPreference);
+    }
+
+    this.state.tradingPreference = buildTradingPreferenceState(profile);
+    this.state.lastHeartbeatAt = isoNow();
+    this.state.strategy = createStrategyRuntimeSummary(this.state, this.strategySnapshots, this.applyStrategyRoute(this.currentStrategyPayload()));
+    this.state.modules = buildModules(this.state);
+    this.state.watchlist = buildWatchlist(this.state);
+
+    const route = resolveStrategyRuntimeRoute(this.state.tradingPreference.selected.profile);
+    this.pushEvent('info', `Operator selected trading preference: ${route.summary}`);
+    void this.refreshStrategyFromLedgerTruth().catch((error) => {
+      this.pushEvent('warning', `Failed to refresh strategy state after trading preference change: ${error instanceof Error ? error.message : String(error)}`);
+    });
+    return structuredClone(this.state.tradingPreference);
+  }
+
   heartbeat(): void {
     this.state.lastHeartbeatAt = isoNow();
     this.schedulePersist();
@@ -444,6 +529,7 @@ export class RuntimeStore {
     const marketData = buildMarketDataState(this.config, {
       ...(typeof existing.marketData === 'object' && existing.marketData ? existing.marketData : {})
     });
+    const persistedTradingPreference = tradingPreferenceStateSchema.safeParse(existing.tradingPreference);
 
     const markets = this.config.polymarketOperatorEligibility === 'restricted'
       ? base.markets
@@ -451,6 +537,9 @@ export class RuntimeStore {
         ? existing.markets
         : base.markets;
     const events = Array.isArray(existing.events) ? existing.events : base.events;
+    const tradingPreference = buildTradingPreferenceState(
+      persistedTradingPreference.success ? persistedTradingPreference.data.selected.profile : base.tradingPreference.selected.profile
+    );
 
     const hydratedState = {
       ...base,
@@ -458,6 +547,7 @@ export class RuntimeStore {
       lastHeartbeatAt: isoNow(),
       publicBaseUrl: this.config.publicBaseUrl,
       remoteDashboardEnabled: this.config.remoteDashboardEnabled,
+      tradingPreference,
       marketData,
       markets,
       events
@@ -468,7 +558,10 @@ export class RuntimeStore {
     hydratedState.strategy = createStrategyRuntimeSummary(
       hydratedState,
       this.strategySnapshots,
-      this.currentStrategyPayload(persistedStrategy.success ? persistedStrategy.data : base.strategy)
+      this.applyStrategyRoute(
+        this.currentStrategyPayload(persistedStrategy.success ? persistedStrategy.data : base.strategy),
+        hydratedState.tradingPreference.selected.profile
+      )
     );
     hydratedState.modules = buildModules(hydratedState);
     hydratedState.watchlist = buildWatchlist(hydratedState);
@@ -500,17 +593,53 @@ export class RuntimeStore {
     };
   }
 
+  private applyStrategyRoute(
+    payload: StrategyEvaluationPayload,
+    profile: TradingPreferenceProfile = this.state.tradingPreference.selected.profile
+  ): StrategyEvaluationPayload {
+    const route = resolveStrategyRuntimeRoute(profile);
+    const cleanedNotes = (payload.notes ?? []).filter(
+      (note) => !note.startsWith('Routing policy: ') && !note.startsWith('Baseline observer: ')
+    );
+
+    if (route.executionMode !== 'reference-only') {
+      return {
+        ...payload,
+        notes: cleanedNotes
+      };
+    }
+
+    return {
+      ...payload,
+      intents: payload.intents.filter((intent) => intent.kind === 'exit' || intent.status === 'submitted'),
+      notes: [
+        `Routing policy: ${route.requested.label} is reference-only, so the runtime suppresses new paper entry emission.`,
+        `Baseline observer: ${route.evaluated.label} still drives candidate visibility while existing paper positions and exits stay managed.`,
+        ...cleanedNotes
+      ]
+    };
+  }
+
+  private async refreshStrategyFromLedgerTruth(): Promise<void> {
+    const payload = await this.restoreLedgerTruth(this.currentStrategyPayload());
+    this.syncStrategyState('market-refresh', payload, { recordSnapshot: false });
+    this.schedulePersist();
+    this.notify();
+  }
+
   private syncStrategyState(
     trigger: StrategyStateSnapshot['trigger'],
     payload: StrategyEvaluationPayload,
     options: { recordSnapshot?: boolean } = {}
   ): void {
+    const routedPayload = this.applyStrategyRoute(payload);
+
     if (options.recordSnapshot !== false) {
-      this.strategySnapshots = [createStrategyStateSnapshot(this.state, trigger, payload), ...this.strategySnapshots]
+      this.strategySnapshots = [createStrategyStateSnapshot(this.state, trigger, routedPayload), ...this.strategySnapshots]
         .slice(0, MAX_STRATEGY_SNAPSHOTS);
     }
 
-    this.state.strategy = createStrategyRuntimeSummary(this.state, this.strategySnapshots, payload);
+    this.state.strategy = createStrategyRuntimeSummary(this.state, this.strategySnapshots, routedPayload);
     this.state.modules = buildModules(this.state);
     this.state.watchlist = buildWatchlist(this.state);
   }
@@ -528,7 +657,11 @@ export class RuntimeStore {
   private summarizePositions(
     projection: Awaited<ReturnType<JsonlLedger['readProjection']>>,
     marketMap: Map<string, RuntimeMarket>,
-    observedAt: string
+    observedAt: string,
+    options: {
+      previousPositions?: PaperPositionSummary[];
+      sessionGuard?: LegacyManagedSessionGuardState | null;
+    } = {}
   ): Map<string, NonNullable<PaperPositionSummary['exit']>> {
     const exits = new Map<string, NonNullable<PaperPositionSummary['exit']>>();
     for (const position of projection.positions.values()) {
@@ -539,13 +672,23 @@ export class RuntimeStore {
         projection,
         position,
         market: marketMap.get(position.marketId) ?? null,
-        observedAt
+        observedAt,
+        previousManagedExit: this.previousManagedExitState(position.positionId, options.previousPositions),
+        sessionGuard: options.sessionGuard ?? null
       });
       if (exit) {
         exits.set(position.positionId, exit);
       }
     }
     return exits;
+  }
+
+  private previousManagedExitState(
+    positionId: string,
+    positions = this.currentStrategyPayload().positions
+  ): LegacyManagedExitState | null {
+    const previous = positions.find((position) => position.id === positionId)?.exit?.managed;
+    return previous?.profile === 'legacy-early-exit-live' ? previous : null;
   }
 
   private parseEntryIntentMetadata(intent: IntentApprovedEvent): {
@@ -692,18 +835,62 @@ export class RuntimeStore {
     position: ProjectedPosition;
     market: RuntimeMarket | null;
     observedAt: string;
+    previousManagedExit?: LegacyManagedExitState | null;
+    sessionGuard?: LegacyManagedSessionGuardState | null;
   }): NonNullable<PaperPositionSummary['exit']> | null {
     const exitPlan = this.resolvePositionExitPlan(input.projection, input.position, input.market);
-    if (!exitPlan) {
+    const managedProfileActive = isLegacyManagedExitProfile(this.state.tradingPreference.selected.profile);
+    const side = exitPlan?.side ?? this.inferSideFromToken(input.market, input.position.tokenId);
+    if (!managedProfileActive && !exitPlan) {
+      return null;
+    }
+    if (managedProfileActive && input.position.averageEntryPrice == null) {
       return null;
     }
 
     const openSellOrder = this.findOpenSellOrder(input.projection, input.position.marketId, input.position.tokenId);
-    const triggers = this.evaluateExitTriggers(input.market, exitPlan.side, exitPlan.exit, input.observedAt);
-    const quote = input.market ? createPaperQuote(input.market, exitPlan.side, input.observedAt) : null;
+    const markPrice = input.market == null ? null : side === 'yes' ? input.market.yesPrice : input.market.noPrice;
+    let triggers: PaperExitTrigger[] = [];
+    let takeProfitPrice = exitPlan?.exit.takeProfitPrice ?? null;
+    let stopLossPrice = exitPlan?.exit.stopLossPrice ?? null;
+    let latestExitAt = exitPlan?.exit.latestExitAt ?? null;
+    let invalidateIfSpreadAbove = exitPlan?.exit.invalidateIfSpreadAbove ?? Number.NaN;
+    let invalidateIfComplementDriftAbove = exitPlan?.exit.invalidateIfComplementDriftAbove ?? Number.NaN;
+    let invalidateIfHoursToExpiryBelow = exitPlan?.exit.invalidateIfHoursToExpiryBelow ?? Number.NaN;
+    let managed: NonNullable<PaperPositionSummary['exit']>['managed'] = null;
+    let sessionGuard: NonNullable<PaperPositionSummary['exit']>['sessionGuard'] = null;
+    let profile: NonNullable<PaperPositionSummary['exit']>['profile'] = 'generic';
+
+    if (managedProfileActive) {
+      const entryPrice = input.position.averageEntryPrice;
+      if (entryPrice == null) {
+        return null;
+      }
+      const managedExit = evaluateLegacyManagedExit({
+        entryPrice,
+        observedAt: input.observedAt,
+        markPrice,
+        marketEndDate: input.market?.endDate ?? null,
+        previousState: input.previousManagedExit ?? null
+      });
+      triggers = managedExit.triggers;
+      takeProfitPrice = managedExit.takeProfitPrice;
+      stopLossPrice = managedExit.stopLossPrice;
+      latestExitAt = managedExit.latestExitAt ?? latestExitAt;
+      invalidateIfSpreadAbove = Number.NaN;
+      invalidateIfComplementDriftAbove = Number.NaN;
+      invalidateIfHoursToExpiryBelow = Number.NaN;
+      managed = managedExit.state;
+      sessionGuard = input.sessionGuard ?? null;
+      profile = 'legacy-early-exit-live';
+    } else if (exitPlan) {
+      triggers = this.evaluateExitTriggers(input.market, side, exitPlan.exit, input.observedAt);
+    }
+
+    const quote = input.market ? createPaperQuote(input.market, side, input.observedAt) : null;
     const recommendedLimitPrice = openSellOrder?.limitPrice ?? (triggers.length > 0 ? quote?.bestBid ?? null : null);
     const referencePrice = recommendedLimitPrice
-      ?? (input.market == null ? null : exitPlan.side === 'yes' ? input.market.yesPrice : input.market.noPrice)
+      ?? markPrice
       ?? input.position.averageEntryPrice
       ?? 0;
     const recommendedQuantity = round(
@@ -717,11 +904,19 @@ export class RuntimeStore {
         ? 'triggered'
         : 'armed';
 
-    let summary = `Paper exit armed at TP ${formatProbability(exitPlan.exit.takeProfitPrice)}, stop ${formatProbability(exitPlan.exit.stopLossPrice)}, latest exit ${exitPlan.exit.latestExitAt}.`;
+    let summary = managedProfileActive && managed
+      ? `Managed paper exit armed at target ${formatProbability(takeProfitPrice)}, stop ${formatProbability(stopLossPrice)}, forced exit ${latestExitAt ?? 'n/a'}. Live execution stays disarmed.`
+      : `Paper exit armed at TP ${formatProbability(takeProfitPrice)}, stop ${formatProbability(stopLossPrice)}, latest exit ${latestExitAt}.`;
     if (openSellOrder) {
       summary = `Reduce-only exit order is working at ${formatProbability(openSellOrder.limitPrice)} for ${round(openSellOrder.remainingQuantity, 6)} contracts.`;
     } else if (triggers.length > 0) {
       summary = `Reduce-only exit recommended because ${triggers.map(formatExitTrigger).join(', ')}.`;
+    }
+    if (managedProfileActive && managed) {
+      summary += ` Peak ${formatProbability(managed.highestObservedPrice)}, low ${formatProbability(managed.lowestObservedPrice)}, profit ${formatProbability(managed.currentProfit)}.`;
+    }
+    if (sessionGuard && sessionGuard.status !== 'clear') {
+      summary += ` Session guard ${sessionGuard.status} (${sessionGuard.reasons.map((reason) => reason.message).join(' ')}).`;
     }
 
     return {
@@ -729,16 +924,24 @@ export class RuntimeStore {
       triggers,
       evaluatedAt: input.observedAt,
       summary,
-      takeProfitPrice: round(exitPlan.exit.takeProfitPrice),
-      stopLossPrice: round(exitPlan.exit.stopLossPrice),
-      latestExitAt: exitPlan.exit.latestExitAt,
-      invalidateIfSpreadAbove: round(exitPlan.exit.invalidateIfSpreadAbove),
-      invalidateIfComplementDriftAbove: round(exitPlan.exit.invalidateIfComplementDriftAbove),
-      invalidateIfHoursToExpiryBelow: round(exitPlan.exit.invalidateIfHoursToExpiryBelow, 2),
+      takeProfitPrice: takeProfitPrice == null ? null : round(takeProfitPrice),
+      stopLossPrice: stopLossPrice == null ? null : round(stopLossPrice),
+      latestExitAt,
+      invalidateIfSpreadAbove: Number.isFinite(invalidateIfSpreadAbove) ? round(invalidateIfSpreadAbove) : null,
+      invalidateIfComplementDriftAbove: Number.isFinite(invalidateIfComplementDriftAbove)
+        ? round(invalidateIfComplementDriftAbove)
+        : null,
+      invalidateIfHoursToExpiryBelow: Number.isFinite(invalidateIfHoursToExpiryBelow)
+        ? round(invalidateIfHoursToExpiryBelow, 2)
+        : null,
       recommendedQuantity,
       recommendedSizeUsd,
       recommendedLimitPrice: recommendedLimitPrice == null ? null : round(recommendedLimitPrice),
-      submittedIntentId: openSellOrder?.intentId ?? null
+      submittedIntentId: openSellOrder?.intentId ?? null,
+      profile,
+      managed,
+      sessionGuard,
+      liveExecutionArmed: false
     };
   }
 
@@ -844,14 +1047,38 @@ export class RuntimeStore {
       return payload;
     }
 
-    const positions = this.projectionPositionsToSummaries(projection, this.marketMap());
+    const observedAt = this.latestLedgerRecordedAt(projection) ?? payload.lastEvaluatedAt ?? this.state.marketData.syncedAt ?? isoNow();
+    const marketMap = this.marketMap();
+    const sessionGuard = isLegacyManagedExitProfile(this.state.tradingPreference.selected.profile)
+      ? evaluateLegacyManagedSessionGuards({
+          positionEvents: projection.positionEvents,
+          now: observedAt
+        })
+      : null;
+    const exits = this.summarizePositions(projection, marketMap, observedAt, {
+      previousPositions: payload.positions,
+      sessionGuard
+    });
+    const positions = this.projectionPositionsToSummaries(projection, marketMap, exits);
     const restoredNotes = (payload.notes ?? []).filter(
-      (note) => !note.startsWith('Recovered ') && !note.startsWith('Ledger projection reported ')
+      (note) => !note.startsWith('Recovered ')
+        && !note.startsWith('Ledger projection reported ')
+        && !note.startsWith('Managed paper session guard ')
+        && !note.startsWith('Legacy early-exit live/managed profile ')
     );
 
     if (positions.length > 0) {
       restoredNotes.unshift(
         `Recovered ${positions.length} open paper position${positions.length === 1 ? '' : 's'} from append-only ledger truth during bootstrap.`
+      );
+    }
+
+    if (sessionGuard) {
+      restoredNotes.unshift('Legacy early-exit live/managed profile is active in paper mode only. Live execution remains disarmed.');
+      restoredNotes.unshift(
+        sessionGuard.status === 'clear'
+          ? `Managed paper session guard is clear with realized P&L ${formatUsd(sessionGuard.realizedPnlUsd)}.`
+          : `Managed paper session guard is ${sessionGuard.status}: ${sessionGuard.reasons.map((reason) => reason.message).join(' ')}`
       );
     }
 
@@ -865,7 +1092,7 @@ export class RuntimeStore {
       ...payload,
       positions,
       notes: restoredNotes,
-      lastEvaluatedAt: this.latestLedgerRecordedAt(projection) ?? payload.lastEvaluatedAt ?? null
+      lastEvaluatedAt: observedAt
     };
   }
 
@@ -987,7 +1214,11 @@ export class RuntimeStore {
   }
 
   private async evaluateStrategy(trigger: StrategyStateSnapshot['trigger'], snapshot: MarketSnapshot): Promise<void> {
-    const report = buildStrategySignalReport(snapshot);
+    const route = resolveStrategyRuntimeRoute(this.state.tradingPreference.selected.profile);
+    const report = buildStrategySignalReport(
+      snapshot,
+      createStrategyEngineOptionsForProfile(route.evaluated.profile)
+    );
     const marketMap = this.marketMap(snapshot.markets);
     const riskConfig = createPaperRiskConfig({
       maxPositionSizeUsd: 40,
@@ -996,19 +1227,31 @@ export class RuntimeStore {
       maxSimultaneousPositions: 3,
       maxSpreadBps: 600
     });
+    const managedProfileActive = isLegacyManagedExitProfile(this.state.tradingPreference.selected.profile);
 
     let projection = await this.ledger.readProjection();
     if (await this.reconcileOpenOrders(projection, marketMap, snapshot.fetchedAt)) {
       projection = await this.ledger.readProjection();
     }
 
+    const previousPayload = this.currentStrategyPayload();
+    const previousPositions = previousPayload.positions;
+    const sessionGuard = managedProfileActive
+      ? evaluateLegacyManagedSessionGuards({
+          positionEvents: projection.positionEvents,
+          now: snapshot.fetchedAt
+        })
+      : null;
+    const entryRiskHooks = sessionGuard ? sessionGuardToRiskHooks(sessionGuard) : undefined;
+
     let positions = this.projectionPositionsToSummaries(projection, marketMap);
     let riskPositions = positions.map(createRiskPositionSnapshot);
 
+    const existingIntents = this.currentStrategyPayload().intents;
     const riskDecisions: RiskDecisionSummary[] = [];
     const intentSummaries: PaperIntentSummary[] = [];
     const previousIntents = new Map(
-      this.currentStrategyPayload().intents
+      previousPayload.intents
         .filter((summary) => summary.kind === 'entry')
         .map((summary) => [`${summary.kind}:${summary.marketId}:${summary.side}`, summary] as const)
     );
@@ -1026,7 +1269,9 @@ export class RuntimeStore {
         projection,
         position,
         market,
-        observedAt: snapshot.fetchedAt
+        observedAt: snapshot.fetchedAt,
+        previousManagedExit: this.previousManagedExitState(position.positionId, previousPositions),
+        sessionGuard
       });
 
       if (!exitPlan || !exitState || exitState.status === 'armed' || !market) {
@@ -1111,91 +1356,123 @@ export class RuntimeStore {
       riskPositions = positions.map(createRiskPositionSnapshot);
     }
 
-    for (const intent of report.intents) {
-      const market = marketMap.get(intent.marketId);
-      if (!market) {
-        continue;
-      }
+    if (route.entryPolicy === 'emit-new-entries') {
+      for (const intent of report.intents) {
+        const market = marketMap.get(intent.marketId);
+        if (!market) {
+          continue;
+        }
 
-      const riskMarket = createRiskMarketSnapshot(market, intent.side, snapshot.fetchedAt);
-      const quote = createPaperQuote(market, intent.side, snapshot.fetchedAt);
-      const tokenId = riskMarket.tokenId ?? `${market.id}:${intent.side}`;
-      const draftDecision = evaluatePaperTradeRisk({
-        intent: {
-          intentId: createRuntimeIntentId(intent),
-          strategyVersion: intent.strategyVersion,
-          marketId: intent.marketId,
-          tokenId,
-          side: intent.side,
-          desiredSizeUsd: intent.suggestedNotionalUsd,
-          maxEntryPrice: intent.entry.acceptablePriceBand.max,
-          reduceOnly: false
-        },
-        market: riskMarket,
-        positions: riskPositions,
-        config: riskConfig,
-        now: snapshot.fetchedAt
-      });
-
-      riskDecisions.push(this.buildRiskDecisionSummary(draftDecision, {
-        marketId: intent.marketId,
-        question: intent.question,
-        kind: 'entry',
-        reduceOnly: false
-      }));
-
-      const previousSummary = previousIntents.get(`entry:${intent.marketId}:${intent.side}`) ?? null;
-      let status: PaperIntentSummary['status'] = draftDecision.decision === 'approve' || draftDecision.decision === 'resize'
-        ? 'watching'
-        : 'draft';
-      let summaryId = previousSummary?.id;
-      let summaryCreatedAt = previousSummary?.createdAt;
-
-      if (quote && (draftDecision.decision === 'approve' || draftDecision.decision === 'resize') && this.shouldSubmitEntry(projection, market.id, tokenId, snapshot.fetchedAt)) {
-        const approvedIntent = this.createApprovedEntryIntent({
-          intent,
-          approvedSizeUsd: draftDecision.approvedSizeUsd,
-          limitPrice: intent.entry.acceptablePriceBand.max,
-          tokenId,
-          observedAt: snapshot.fetchedAt
+        const riskMarket = createRiskMarketSnapshot(market, intent.side, snapshot.fetchedAt);
+        const quote = createPaperQuote(market, intent.side, snapshot.fetchedAt);
+        const tokenId = riskMarket.tokenId ?? `${market.id}:${intent.side}`;
+        const draftDecision = evaluatePaperTradeRisk({
+          intent: {
+            intentId: createRuntimeIntentId(intent),
+            strategyVersion: intent.strategyVersion,
+            marketId: intent.marketId,
+            tokenId,
+            side: intent.side,
+            desiredSizeUsd: intent.suggestedNotionalUsd,
+            maxEntryPrice: intent.entry.acceptablePriceBand.max,
+            reduceOnly: false
+          },
+          market: riskMarket,
+          positions: riskPositions,
+          hooks: entryRiskHooks,
+          config: riskConfig,
+          now: snapshot.fetchedAt
         });
 
-        if (approvedIntent) {
-          await this.paperExecution.submitApprovedIntent({ intent: approvedIntent, quote });
-          projection = await this.ledger.readProjection();
-          positions = this.projectionPositionsToSummaries(projection, marketMap);
-          riskPositions = positions.map(createRiskPositionSnapshot);
-          status = 'submitted';
-          summaryId = approvedIntent.intentId;
-          summaryCreatedAt = approvedIntent.approvedAt;
-          submittedEntryCount += 1;
-        }
-      }
+        riskDecisions.push(this.buildRiskDecisionSummary(draftDecision, {
+          marketId: intent.marketId,
+          question: intent.question,
+          kind: 'entry',
+          reduceOnly: false
+        }));
 
-      intentSummaries.push(
-        createEntryIntentSummary(
-          intent,
-          status,
-          draftDecision.approvedSizeUsd > 0 ? draftDecision.approvedSizeUsd : intent.suggestedNotionalUsd,
-          {
-            id: summaryId,
-            createdAt: summaryCreatedAt
+        const previousSummary = previousIntents.get(`entry:${intent.marketId}:${intent.side}`) ?? null;
+        let status: PaperIntentSummary['status'] = draftDecision.decision === 'approve' || draftDecision.decision === 'resize'
+          ? 'watching'
+          : 'draft';
+        let summaryId = previousSummary?.id;
+        let summaryCreatedAt = previousSummary?.createdAt;
+
+        if (quote && (draftDecision.decision === 'approve' || draftDecision.decision === 'resize') && this.shouldSubmitEntry(projection, market.id, tokenId, snapshot.fetchedAt)) {
+          const approvedIntent = this.createApprovedEntryIntent({
+            intent,
+            approvedSizeUsd: draftDecision.approvedSizeUsd,
+            limitPrice: intent.entry.acceptablePriceBand.max,
+            tokenId,
+            observedAt: snapshot.fetchedAt
+          });
+
+          if (approvedIntent) {
+            await this.paperExecution.submitApprovedIntent({ intent: approvedIntent, quote });
+            projection = await this.ledger.readProjection();
+            positions = this.projectionPositionsToSummaries(projection, marketMap);
+            riskPositions = positions.map(createRiskPositionSnapshot);
+            status = 'submitted';
+            summaryId = approvedIntent.intentId;
+            summaryCreatedAt = approvedIntent.approvedAt;
+            submittedEntryCount += 1;
           }
-        )
-      );
+        }
+
+        intentSummaries.push(
+          createEntryIntentSummary(
+            intent,
+            status,
+            draftDecision.approvedSizeUsd > 0 ? draftDecision.approvedSizeUsd : intent.suggestedNotionalUsd,
+            {
+              id: summaryId,
+              createdAt: summaryCreatedAt
+            }
+          )
+        );
+      }
     }
 
-    const positionExits = this.summarizePositions(projection, marketMap, snapshot.fetchedAt);
+    if (route.entryPolicy !== 'emit-new-entries') {
+      const preservedSubmittedEntries = existingIntents.filter(
+        (summary) => summary.kind === 'entry' && summary.status === 'submitted'
+      );
+      const seenIntentIds = new Set(intentSummaries.map((summary) => summary.id));
+      for (const summary of preservedSubmittedEntries) {
+        if (!seenIntentIds.has(summary.id)) {
+          intentSummaries.unshift(summary);
+          seenIntentIds.add(summary.id);
+        }
+      }
+    }
+
+    const positionExits = this.summarizePositions(projection, marketMap, snapshot.fetchedAt, {
+      previousPositions,
+      sessionGuard
+    });
     positions = this.projectionPositionsToSummaries(projection, marketMap, positionExits);
     const armedExitCount = positions.filter((position) => position.exit?.status === 'armed').length;
     const triggeredExitCount = positions.filter((position) => position.exit?.status === 'triggered').length;
     const workingExitCount = positions.filter((position) => position.exit?.status === 'submitted').length;
+    const referenceBaselineCandidateCount = report.intents.length;
 
     const notes = [
       'Append-only paper ledger is active for paper intents, orders, fills, and positions.',
+      managedProfileActive
+        ? 'Legacy early-exit live/managed profile is selected in paper mode only. Managed exits and session guards are active while live execution remains disarmed.'
+        : 'Current runtime is using the routed paper entry and exit baseline.',
+      sessionGuard
+        ? sessionGuard.status === 'clear'
+          ? `Managed paper session guard is clear with realized P&L ${formatUsd(sessionGuard.realizedPnlUsd)}.`
+          : `Managed paper session guard is ${sessionGuard.status}: ${sessionGuard.reasons.map((reason) => reason.message).join(' ')}`
+        : 'Session guard scaffolding is inactive for this trading preference.',
       submittedEntryCount > 0
         ? `Submitted ${submittedEntryCount} new paper entry intent${submittedEntryCount === 1 ? '' : 's'} on the latest evaluation.`
-        : 'No new paper entries were submitted on the latest evaluation.',
+        : route.entryPolicy === 'emit-new-entries'
+          ? 'No new paper entries were submitted on the latest evaluation.'
+          : referenceBaselineCandidateCount > 0
+            ? `${route.requested.label} is reference-only, so ${referenceBaselineCandidateCount} baseline candidate${referenceBaselineCandidateCount === 1 ? '' : 's'} stayed visible but no new paper entries were emitted.`
+            : `${route.requested.label} is reference-only, so new paper entry emission stayed parked on the latest evaluation.`,
       submittedExitCount > 0
         ? `Submitted ${submittedExitCount} reduce-only paper exit intent${submittedExitCount === 1 ? '' : 's'} on the latest evaluation.`
         : triggeredExitCount > 0

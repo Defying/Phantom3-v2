@@ -61,6 +61,45 @@ export const runtimeMarketDataSchema = z.object({
 });
 export type RuntimeMarketData = z.infer<typeof runtimeMarketDataSchema>;
 
+export const tradingPreferenceProfileSchema = z.enum([
+  'current-v2-generic',
+  'legacy-early-exit-classic',
+  'legacy-early-exit-live',
+  'legacy-sniper-hold'
+]);
+export type TradingPreferenceProfile = z.infer<typeof tradingPreferenceProfileSchema>;
+
+export const tradingPreferenceParityStatusSchema = z.enum(['current-runtime', 'legacy-reference']);
+export type TradingPreferenceParityStatus = z.infer<typeof tradingPreferenceParityStatusSchema>;
+
+export const tradingPreferenceOptionSchema = z.object({
+  profile: tradingPreferenceProfileSchema,
+  label: z.string(),
+  summary: z.string(),
+  note: z.string(),
+  intendedMarkets: z.array(z.enum(['BTC', 'ETH', 'SOL'])).min(1),
+  intendedTimeframes: z.array(z.enum(['5m', '15m'])).min(1),
+  parityStatus: tradingPreferenceParityStatusSchema
+});
+export type TradingPreferenceOption = z.infer<typeof tradingPreferenceOptionSchema>;
+
+export const tradingPreferenceStateSchema = z.object({
+  selected: tradingPreferenceOptionSchema,
+  available: z.array(tradingPreferenceOptionSchema).min(1)
+});
+export type TradingPreferenceState = z.infer<typeof tradingPreferenceStateSchema>;
+
+export const updateTradingPreferenceRequestSchema = z.object({
+  profile: tradingPreferenceProfileSchema
+});
+export type UpdateTradingPreferenceRequest = z.infer<typeof updateTradingPreferenceRequestSchema>;
+
+export const updateTradingPreferenceResponseSchema = z.object({
+  ok: z.literal(true),
+  tradingPreference: tradingPreferenceStateSchema
+});
+export type UpdateTradingPreferenceResponse = z.infer<typeof updateTradingPreferenceResponseSchema>;
+
 export const runtimeMarketSchema = z.object({
   id: z.string(),
   eventId: z.string(),
@@ -99,6 +138,22 @@ export const strategyCandidateSchema = z.object({
 });
 export type StrategyCandidate = z.infer<typeof strategyCandidateSchema>;
 
+export const paperExitTriggerSchema = z.enum([
+  'take-profit-hit',
+  'stop-loss-hit',
+  'latest-exit-reached',
+  'spread-invalidated',
+  'complement-invalidated',
+  'expiry-window',
+  'managed-target-hit',
+  'managed-stop-hit',
+  'managed-trailing-stop',
+  'managed-break-even',
+  'managed-time-decay-profit',
+  'managed-market-closing'
+]);
+export type PaperExitTrigger = z.infer<typeof paperExitTriggerSchema>;
+
 export const paperIntentSummarySchema = z.object({
   id: z.string(),
   marketId: z.string(),
@@ -112,14 +167,7 @@ export const paperIntentSummarySchema = z.object({
   thesis: z.string(),
   desiredSizeUsd: z.number().nonnegative(),
   positionId: z.string().nullable(),
-  trigger: z.enum([
-    'take-profit-hit',
-    'stop-loss-hit',
-    'latest-exit-reached',
-    'spread-invalidated',
-    'complement-invalidated',
-    'expiry-window'
-  ]).nullable(),
+  trigger: paperExitTriggerSchema.nullable(),
   limitPrice: z.number().min(0).max(1).nullable(),
   maxEntryPrice: z.number().min(0).max(1).nullable()
 });
@@ -139,15 +187,60 @@ export const riskDecisionSummarySchema = z.object({
 });
 export type RiskDecisionSummary = z.infer<typeof riskDecisionSummarySchema>;
 
-export const paperExitTriggerSchema = z.enum([
-  'take-profit-hit',
-  'stop-loss-hit',
-  'latest-exit-reached',
-  'spread-invalidated',
-  'complement-invalidated',
-  'expiry-window'
-]);
-export type PaperExitTrigger = z.infer<typeof paperExitTriggerSchema>;
+export const paperManagedExitStateSchema = z.object({
+  profile: z.literal('legacy-early-exit-live'),
+  fixedTargetPrice: z.number().min(0).max(1),
+  dynamicStopPrice: z.number().min(0).max(1),
+  stopLossFloorPrice: z.number().min(0).max(1),
+  stopLossDistance: z.number().nonnegative(),
+  trailingStopActivationGain: z.number().nonnegative(),
+  trailingStopThreshold: z.number().nonnegative(),
+  breakEvenDipThreshold: z.number().nonnegative(),
+  breakEvenArmed: z.boolean(),
+  trailingStopEligible: z.boolean(),
+  highestObservedPrice: z.number().min(0).max(1),
+  lowestObservedPrice: z.number().min(0).max(1),
+  gainFromEntry: z.number().nonnegative(),
+  dipFromEntry: z.number().nonnegative(),
+  dropFromPeak: z.number().nonnegative(),
+  currentProfit: z.number().nullable(),
+  secondsToClose: z.number().int().nonnegative().nullable(),
+  forceExitAt: z.string().nullable(),
+  timeDecayStage: z.enum(['normal', 'profit-3pct', 'profit-1pct', 'force-exit']),
+  observations: z.number().int().nonnegative(),
+  lastObservedAt: z.string(),
+  liveExecutionArmed: z.literal(false)
+});
+export type PaperManagedExitState = z.infer<typeof paperManagedExitStateSchema>;
+
+export const paperSessionGuardReasonSchema = z.object({
+  code: z.enum([
+    'session-drawdown-stop',
+    'session-profit-pullback-stop',
+    'session-consecutive-loss-cooldown'
+  ]),
+  message: z.string()
+});
+export type PaperSessionGuardReason = z.infer<typeof paperSessionGuardReasonSchema>;
+
+export const paperSessionGuardSchema = z.object({
+  profile: z.literal('legacy-early-exit-live'),
+  status: z.enum(['clear', 'cooldown', 'blocked']),
+  reasons: z.array(paperSessionGuardReasonSchema),
+  realizedPnlUsd: z.number(),
+  peakRealizedPnlUsd: z.number(),
+  drawdownUsd: z.number(),
+  dailyProfitTargetUsd: z.number(),
+  sessionPullbackUsd: z.number(),
+  maxSessionDrawdownUsd: z.number().nullable(),
+  consecutiveLosses: z.number().int().nonnegative(),
+  maxConsecutiveLosses: z.number().int().nonnegative(),
+  cooldownUntil: z.string().nullable(),
+  lastClosedTradeAt: z.string().nullable(),
+  outcomeCount: z.number().int().nonnegative(),
+  liveExecutionArmed: z.literal(false)
+});
+export type PaperSessionGuard = z.infer<typeof paperSessionGuardSchema>;
 
 export const paperPositionExitSchema = z.object({
   status: z.enum(['armed', 'triggered', 'submitted']),
@@ -163,7 +256,11 @@ export const paperPositionExitSchema = z.object({
   recommendedQuantity: z.number().nonnegative(),
   recommendedSizeUsd: z.number().nonnegative(),
   recommendedLimitPrice: z.number().min(0).max(1).nullable(),
-  submittedIntentId: z.string().nullable()
+  submittedIntentId: z.string().nullable(),
+  profile: z.enum(['generic', 'legacy-early-exit-live']).optional(),
+  managed: paperManagedExitStateSchema.nullable().optional(),
+  sessionGuard: paperSessionGuardSchema.nullable().optional(),
+  liveExecutionArmed: z.literal(false).optional()
 });
 export type PaperPositionExit = z.infer<typeof paperPositionExitSchema>;
 
@@ -183,12 +280,34 @@ export const paperPositionSummarySchema = z.object({
 });
 export type PaperPositionSummary = z.infer<typeof paperPositionSummarySchema>;
 
+export const strategyRoutingExecutionModeSchema = z.enum(['paper-active', 'reference-only']);
+export type StrategyRoutingExecutionMode = z.infer<typeof strategyRoutingExecutionModeSchema>;
+
+export const strategyRoutingEntryPolicySchema = z.enum(['emit-new-entries', 'manage-open-positions-only']);
+export type StrategyRoutingEntryPolicy = z.infer<typeof strategyRoutingEntryPolicySchema>;
+
+export const strategyRoutingSummarySchema = z.object({
+  requestedProfile: tradingPreferenceProfileSchema,
+  requestedLabel: z.string(),
+  evaluatedProfile: tradingPreferenceProfileSchema,
+  evaluatedLabel: z.string(),
+  strategyId: z.string(),
+  strategyVersion: z.string(),
+  selectionMode: z.string(),
+  executionMode: strategyRoutingExecutionModeSchema,
+  entryPolicy: strategyRoutingEntryPolicySchema,
+  summary: z.string(),
+  note: z.string()
+});
+export type StrategyRoutingSummary = z.infer<typeof strategyRoutingSummarySchema>;
+
 export const strategyRuntimeSummarySchema = z.object({
   engineId: z.string(),
   strategyVersion: z.string(),
   mode: runtimeModeSchema,
   status: strategyRuntimeStatusSchema,
   safeToExpose: z.literal(true),
+  routing: strategyRoutingSummarySchema.optional(),
   lastEvaluatedAt: z.string().nullable(),
   lastSnapshotAt: z.string().nullable(),
   watchedMarketCount: z.number().int().nonnegative(),
@@ -239,6 +358,7 @@ export const runtimeStateSchema = z.object({
   paused: z.boolean(),
   remoteDashboardEnabled: z.boolean(),
   publicBaseUrl: z.string(),
+  tradingPreference: tradingPreferenceStateSchema,
   marketData: runtimeMarketDataSchema,
   markets: z.array(runtimeMarketSchema),
   strategy: strategyRuntimeSummarySchema,

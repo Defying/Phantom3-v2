@@ -567,6 +567,49 @@ a:hover { color: var(--text-1); }
 
 .panel-strategy { background: linear-gradient(180deg, var(--surface-2) 0%, var(--surface-0) 100%); }
 
+.strategy-route-card {
+  display: grid;
+  gap: var(--sp-2);
+  padding: var(--sp-3);
+  border-radius: var(--r-2);
+}
+.strategy-route-card.is-active {
+  background: rgba(34, 197, 94, 0.08);
+  border: 1px solid rgba(34, 197, 94, 0.18);
+}
+.strategy-route-card.is-reference {
+  background: rgba(245, 182, 66, 0.10);
+  border: 1px solid rgba(245, 182, 66, 0.22);
+}
+.strategy-route-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--sp-3);
+}
+.strategy-route-head strong {
+  font-size: var(--font-2);
+  color: var(--text-1);
+}
+.strategy-route-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+}
+.strategy-route-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  color: var(--text-3);
+  font-size: var(--font-1);
+}
+.strategy-route-meta strong {
+  color: var(--text-1);
+  font-weight: 600;
+}
+
 .strategy-kv {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -720,6 +763,94 @@ a:hover { color: var(--text-1); }
   border-color: var(--warn-line);
 }
 .btn-warning:hover:not(:disabled) { background: rgba(245, 182, 66, 0.22); }
+.btn-secondary {
+  background: var(--surface-2);
+  color: var(--text-2);
+  border-color: var(--border-strong);
+}
+.btn-secondary:hover:not(:disabled) { background: var(--surface-3); color: var(--text-1); }
+
+.control-divider {
+  height: 1px;
+  background: var(--border-soft);
+}
+
+.preference-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--sp-3);
+}
+.preference-header h3 {
+  font-size: var(--font-3);
+  line-height: 1.3;
+}
+.preference-list {
+  display: grid;
+  gap: var(--sp-3);
+}
+.preference-card {
+  display: grid;
+  gap: var(--sp-2);
+  padding: var(--sp-3);
+  border-radius: var(--r-2);
+  border: 1px solid var(--border);
+  background: var(--surface-0);
+}
+.preference-card.is-selected {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent-soft);
+}
+.preference-route-note {
+  display: grid;
+  gap: var(--sp-2);
+  padding: var(--sp-3);
+  border-radius: var(--r-2);
+  background: var(--surface-0);
+}
+.preference-route-note.is-active {
+  border: 1px solid rgba(34, 197, 94, 0.18);
+}
+.preference-route-note.is-reference {
+  border: 1px solid rgba(245, 182, 66, 0.22);
+}
+.preference-route-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--sp-3);
+}
+.preference-route-head strong {
+  color: var(--text-1);
+  line-height: 1.4;
+}
+.preference-route-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  color: var(--text-3);
+  font-size: var(--font-1);
+}
+.preference-route-meta strong {
+  color: var(--text-1);
+  font-weight: 600;
+}
+.preference-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--sp-3);
+}
+.preference-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  color: var(--text-3);
+  font-size: var(--font-1);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
 
 .link-button {
   background: transparent;

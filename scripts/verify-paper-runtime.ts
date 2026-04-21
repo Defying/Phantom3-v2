@@ -8,9 +8,10 @@ import process from 'node:process'
 import { RuntimeStore } from '../apps/api/src/runtime-store.js'
 import { paperStrategyViewSchema, runtimeStateSchema } from '../packages/contracts/src/index.js'
 import { getOpenOrders, JsonlLedger } from '../packages/ledger/src/index.js'
-import { fetchTopMarkets } from '../packages/market-data/src/index.js'
+import { discoverCryptoWindowMarkets, fetchTopMarkets } from '../packages/market-data/src/index.js'
 import { PaperExecutionAdapter } from '../packages/paper-execution/src/index.js'
 import { parseSocksProxyUrl } from '../packages/transport/src/index.js'
+import { evaluateLegacyManagedExit, evaluateLegacyManagedSessionGuards } from '../packages/strategy/src/index.js'
 import type { AppConfig } from '../packages/config/src/index.js'
 import type { RuntimeMarket } from '../packages/contracts/src/index.js'
 
@@ -151,6 +152,90 @@ async function main(): Promise<void> {
       }
     })
 
+    await expect('crypto window discovery narrows to BTC/ETH/SOL 5m/15m markets with explicit reject reasons', () => {
+      const report = discoverCryptoWindowMarkets([
+        {
+          id: 'btc-live',
+          question: 'Bitcoin Up or Down - April 21, 12:25PM-12:30PM ET',
+          slug: 'btc-updown-5m-1776789000',
+          outcomes: '["Up", "Down"]',
+          clobTokenIds: '["btc-up", "btc-down"]',
+          spread: '0.02',
+          liquidityClob: '12000',
+          volume24hr: '220',
+          endDate: '2026-04-21T16:30:00.000Z',
+          resolutionSource: 'https://data.chain.link/streams/btc-usd',
+          active: true,
+          closed: false,
+          acceptingOrders: true,
+          enableOrderBook: true,
+          events: [{ id: 'event-btc-live', title: 'Bitcoin Up or Down - April 21, 12:25PM-12:30PM ET', slug: 'btc-updown-5m-1776789000' }]
+        },
+        {
+          id: 'eth-disabled',
+          question: 'Ethereum Up or Down - April 21, 12:30PM-12:45PM ET',
+          slug: 'eth-updown-15m-1776789900',
+          outcomes: '["Up", "Down"]',
+          clobTokenIds: '["eth-up", "eth-down"]',
+          spread: '0.03',
+          liquidityClob: '9000',
+          volume24hr: '90',
+          endDate: '2026-04-21T16:45:00.000Z',
+          resolutionSource: 'https://data.chain.link/streams/eth-usd',
+          active: true,
+          closed: false,
+          acceptingOrders: true,
+          enableOrderBook: false,
+          events: [{ id: 'event-eth-disabled', title: 'Ethereum Up or Down - April 21, 12:30PM-12:45PM ET', slug: 'eth-updown-15m-1776789900' }]
+        },
+        {
+          id: 'xrp-out-of-scope',
+          question: 'XRP Up or Down - April 21, 12:25PM-12:30PM ET',
+          slug: 'xrp-updown-5m-1776789000',
+          outcomes: '["Up", "Down"]',
+          clobTokenIds: '["xrp-up", "xrp-down"]',
+          endDate: '2026-04-21T16:30:00.000Z',
+          active: true,
+          closed: false,
+          acceptingOrders: true,
+          enableOrderBook: true,
+          events: [{ id: 'event-xrp', title: 'XRP Up or Down - April 21, 12:25PM-12:30PM ET', slug: 'xrp-updown-5m-1776789000' }]
+        },
+        {
+          id: 'btc-malformed',
+          question: 'Bitcoin Up or Down - April 21, 12:40PM-12:50PM ET',
+          slug: 'btc-updown-10m-1776790200',
+          outcomes: '["Up", "Down"]',
+          clobTokenIds: '["btc-bad-up"]',
+          endDate: '2026-04-21T16:50:00.000Z',
+          active: true,
+          closed: false,
+          acceptingOrders: true,
+          enableOrderBook: true,
+          events: [{ id: 'event-btc-bad', title: 'Bitcoin Up or Down - April 21, 12:40PM-12:50PM ET', slug: 'btc-updown-10m-1776790200' }]
+        }
+      ], {
+        limit: 1,
+        now: '2026-04-21T16:21:00.000Z'
+      })
+
+      assert.equal(report.accepted.length, 2)
+      assert.equal(report.selected.length, 1)
+      assert.equal(report.selected[0]?.market.id, 'btc-live')
+      assert.equal(report.selected[0]?.classification.asset, 'BTC')
+      assert.equal(report.selected[0]?.classification.timeframe, '5m')
+      assert.equal(report.selected[0]?.classification.windowDurationMinutes, 5)
+      assert.equal(report.selected[0]?.classification.comparisonHook.pair, 'BTC-USD')
+      assert.equal(report.accepted[1]?.operationalState, 'book-disabled')
+
+      const rejectCodes = report.rejected.flatMap((market) => market.rejectReasons.map((reason) => reason.code))
+      assert(rejectCodes.includes('asset-out-of-scope'))
+      assert(rejectCodes.includes('window-out-of-scope'))
+      assert(rejectCodes.includes('missing-token-ids'))
+
+      return `${report.selected[0]?.market.question} selected, ${report.rejected.length} rejected with typed reasons`
+    })
+
     await expect('restricted Polymarket eligibility fails closed before any live request', async () => {
       await assert.rejects(
         fetchTopMarkets({ limit: 1, operatorEligibility: 'restricted' }),
@@ -175,6 +260,93 @@ async function main(): Promise<void> {
       assert.deepEqual(projection.anomalies, [])
       assert.equal(getOpenOrders(projection).length, 0)
       return `net=${position.netQuantity}, avg=${position.averageEntryPrice}, realized=${position.realizedPnl}`
+    })
+
+    await expect('legacy managed exit evaluation tracks trailing, break-even, time-decay, and stop states', () => {
+      const trailingSeed = evaluateLegacyManagedExit({
+        entryPrice: 0.85,
+        observedAt: '2026-04-20T20:00:00.000Z',
+        markPrice: 0.91,
+        marketEndDate: '2026-04-20T20:05:00.000Z'
+      })
+      const trailing = evaluateLegacyManagedExit({
+        entryPrice: 0.85,
+        observedAt: '2026-04-20T20:02:00.000Z',
+        markPrice: 0.858,
+        marketEndDate: '2026-04-20T20:05:00.000Z',
+        previousState: trailingSeed.state
+      })
+      assert.ok(trailing.triggers.includes('managed-trailing-stop'))
+
+      const damagedSeed = evaluateLegacyManagedExit({
+        entryPrice: 0.85,
+        observedAt: '2026-04-20T20:00:00.000Z',
+        markPrice: 0.8,
+        marketEndDate: '2026-04-20T20:05:00.000Z'
+      })
+      const damaged = evaluateLegacyManagedExit({
+        entryPrice: 0.85,
+        observedAt: '2026-04-20T20:03:45.000Z',
+        markPrice: 0.89,
+        marketEndDate: '2026-04-20T20:05:00.000Z',
+        previousState: damagedSeed.state
+      })
+      assert.ok(damaged.triggers.includes('managed-break-even'))
+      assert.ok(damaged.triggers.includes('managed-time-decay-profit'))
+
+      const forceExit = evaluateLegacyManagedExit({
+        entryPrice: 0.85,
+        observedAt: '2026-04-20T20:04:40.000Z',
+        markPrice: 0.84,
+        marketEndDate: '2026-04-20T20:05:00.000Z'
+      })
+      assert.ok(forceExit.triggers.includes('managed-market-closing'))
+
+      const stopExit = evaluateLegacyManagedExit({
+        entryPrice: 0.85,
+        observedAt: '2026-04-20T20:01:00.000Z',
+        markPrice: 0.78,
+        marketEndDate: '2026-04-20T20:05:00.000Z'
+      })
+      assert.ok(stopExit.triggers.includes('managed-stop-hit'))
+
+      return trailing.triggers.join(', ')
+    })
+
+    await expect('legacy session guard evaluation derives cooldown and drawdown stops from closed paper outcomes', () => {
+      const cooldown = evaluateLegacyManagedSessionGuards({
+        now: '2026-04-20T20:10:00.000Z',
+        config: {
+          maxSessionDrawdownUsd: null,
+          dailyProfitTargetUsd: 999,
+          maxConsecutiveLosses: 3,
+          cooldownMs: 10 * 60 * 1000
+        },
+        positionEvents: [
+          { positionId: 'p1', recordedAt: '2026-04-20T20:00:00.000Z', transition: 'opened', realizedPnlDelta: 0 },
+          { positionId: 'p1', recordedAt: '2026-04-20T20:01:00.000Z', transition: 'closed', realizedPnlDelta: -5 },
+          { positionId: 'p2', recordedAt: '2026-04-20T20:02:00.000Z', transition: 'opened', realizedPnlDelta: 0 },
+          { positionId: 'p2', recordedAt: '2026-04-20T20:03:00.000Z', transition: 'closed', realizedPnlDelta: -4 },
+          { positionId: 'p3', recordedAt: '2026-04-20T20:04:00.000Z', transition: 'opened', realizedPnlDelta: 0 },
+          { positionId: 'p3', recordedAt: '2026-04-20T20:05:00.000Z', transition: 'closed', realizedPnlDelta: -6 }
+        ]
+      })
+      assert.equal(cooldown.status, 'cooldown')
+      assert.ok(cooldown.cooldownUntil)
+
+      const blocked = evaluateLegacyManagedSessionGuards({
+        now: '2026-04-20T20:10:00.000Z',
+        positionEvents: [
+          { positionId: 'p1', recordedAt: '2026-04-20T20:00:00.000Z', transition: 'opened', realizedPnlDelta: 0 },
+          { positionId: 'p1', recordedAt: '2026-04-20T20:01:00.000Z', transition: 'closed', realizedPnlDelta: -15 },
+          { positionId: 'p2', recordedAt: '2026-04-20T20:02:00.000Z', transition: 'opened', realizedPnlDelta: 0 },
+          { positionId: 'p2', recordedAt: '2026-04-20T20:03:00.000Z', transition: 'closed', realizedPnlDelta: -20 }
+        ]
+      })
+      assert.equal(blocked.status, 'blocked')
+      assert.ok(blocked.reasons.some((reason) => reason.code === 'session-drawdown-stop'))
+
+      return `cooldownUntil=${cooldown.cooldownUntil}, blockedPnl=${blocked.realizedPnlUsd}`
     })
 
     await expect('runtime bootstrap rehydrates paper positions from ledger truth and keeps the API schema valid', async () => {
@@ -227,8 +399,19 @@ async function main(): Promise<void> {
       assert.equal(parsedView.latestSnapshot?.trigger, 'bootstrap')
       assert.equal(parsedView.latestSnapshot?.positions.length, 1)
 
+      store.setTradingPreference('legacy-early-exit-live')
+      await wait(150)
+      const managedState = runtimeStateSchema.parse(store.getState())
+      const managedPosition = managedState.strategy.positions[0]
+      assert(managedPosition?.exit, 'expected a typed exit state after switching to the managed profile')
+      assert.equal(managedPosition.exit?.profile, 'legacy-early-exit-live')
+      assert.equal(managedPosition.exit?.managed?.profile, 'legacy-early-exit-live')
+      assert.equal(managedPosition.exit?.managed?.liveExecutionArmed, false)
+      assert.equal(managedPosition.exit?.sessionGuard?.liveExecutionArmed, false)
+      assert.match(managedState.strategy.notes.join(' '), /Legacy early-exit live\/managed is selected in paper-only managed mode\./)
+
       await wait(100)
-      return `${position.quantity} contracts restored for ${position.marketQuestion}`
+      return `${managedPosition.quantity} contracts restored with ${managedPosition.exit?.profile} exit state for ${managedPosition.marketQuestion}`
     })
   } finally {
     await wait(100)

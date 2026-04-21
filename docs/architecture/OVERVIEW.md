@@ -27,6 +27,7 @@ This repo is the first executable milestone of the Phantom3 v2 rebuild.
 The next milestone is a **paper-safe strategy** milestone, not a live-trading milestone.
 
 Use these docs together:
+- `docs/architecture/CRYPTO_WINDOW_PARITY_SPEC.md`
 - `docs/milestones/PAPER_SAFE_STRATEGY_MILESTONE.md`
 - `docs/qa/PAPER_SAFE_STRATEGY_CHECKLIST.md`
 - `docs/runbooks/PAPER_SAFE_OPERATOR_RUNBOOK.md`

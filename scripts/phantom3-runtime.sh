@@ -29,7 +29,7 @@ usage() {
 Usage: $(basename "$0") <command> [options]
 
 Commands:
-  preflight        Install deps if needed, run type-check, build the dashboard, verify paper-safe docs
+  preflight        Install deps if needed, run type-check, build the dashboard, and run repo-local safety verifiers
   run              Run the API in the foreground (good for launchd or manual debugging)
   start            Start the runtime in the background and wait for /api/health
   stop [--force]   Stop the background runtime recorded in ${RUNTIME_PID_FILE:-<log-dir>/runtime.pid}
@@ -215,6 +215,7 @@ run_preflight() {
   (cd "$ROOT" && npm run check)
   build_dashboard "$skip_build"
   (cd "$ROOT" && npm run verify:paper-safe)
+  (cd "$ROOT" && npm run verify:trading-preference)
 
   printf 'preflight ok\n'
   printf 'env: %s\n' "$ACTIVE_ENV_FILE"

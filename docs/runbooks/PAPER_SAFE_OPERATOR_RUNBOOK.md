@@ -51,6 +51,7 @@ cp .env.example .env
 npm install
 npm run runtime:preflight
 npm run verify:paper-runtime
+npm run verify:trading-preference
 npm run runtime:start
 npm run runtime:status
 ```
@@ -63,10 +64,12 @@ What the helper does:
 
 Then confirm:
 - `npm run verify:paper-runtime` passed on the same commit you are about to run
+- `npm run verify:trading-preference` passed on the same commit you are about to run
 - `/api/health` returns healthy JSON
 - `/api/runtime` reports `mode: "paper"`
 - `/api/runtime` shows the expected Polymarket transport route and eligibility note
 - the runtime shows the execution path as blocked or disarmed
+- a selected legacy trading preference is labeled reference-only until parity work actually lands
 - unauthorized control requests fail with `401`
 
 Useful operator commands:

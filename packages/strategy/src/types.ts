@@ -23,6 +23,12 @@ export type SupportReasonCode =
   | 'clear-consensus-skew'
   | 'discounted-side-in-band'
 
+export type StrategySelectionMode =
+  | 'discounted-underdog'
+  | 'legacy-early-exit-classic'
+  | 'legacy-early-exit-live-managed'
+  | 'legacy-sniper-hold'
+
 export type StrategyEngineOptions = {
   strategyId: string
   strategyVersion: string
@@ -52,7 +58,7 @@ export type StrategyEngineOptions = {
 export type StrategyEngineMetadata = {
   strategyId: string
   strategyVersion: string
-  selectionMode: 'discounted-underdog'
+  selectionMode: StrategySelectionMode
   paperOnly: true
   source: 'market-snapshot'
 }

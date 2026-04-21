@@ -6,9 +6,9 @@ This repo is the **v2 bootstrap**: a TypeScript modular-monolith skeleton with a
 
 ## Current status
 
-This repo is still the **Milestone 1 read-only observer**.
+This repo is a **paper-safe runtime bootstrap**, not a live-trading system.
 
-The paper-safe strategy materials below define the gate for the next milestone. They are a plan and verification pack, **not** a claim that the strategy milestone is already done.
+The paper-safe strategy materials below are still the safety gate, but the repo now includes a working paper runtime with strategy, risk, ledger, and dashboard wiring.
 
 Implemented today:
 - TypeScript runtime
@@ -16,15 +16,16 @@ Implemented today:
 - WebSocket runtime stream (`/api/ws`)
 - read-only Polymarket market snapshot (Gamma + CLOB midpoint data)
 - explicit, venue-scoped Polymarket transport controls with optional SOCKS5 routing
+- generic paper-only strategy engine runtime
 - pure paper-trading risk evaluation module
+- append-only paper ledger projection and paper execution adapter
+- persisted runtime state on disk
+- persisted trading-preference control with legacy reference profiles and a paper-managed exit/session-guard foundation for the legacy live profile
 - bounded control API
-- file-backed bootstrap runtime state
 - safe defaults (paper mode, live disarmed)
 
 Not implemented yet:
-- strategy engine runtime wiring
-- append-only paper ledger
-- paper execution adapter
+- full legacy strategy parity for the new trading-preference profiles (entries still do not match the legacy bots)
 - replay / comparison harness
 - live execution
 
@@ -37,6 +38,7 @@ cp .env.example .env
 npm install
 npm run runtime:preflight
 npm run verify:paper-runtime
+npm run verify:trading-preference
 npm run runtime:start
 npm run runtime:status
 ```
@@ -151,6 +153,8 @@ Reference files:
 ## Paper-safe strategy docs
 
 - milestone definition: `docs/milestones/PAPER_SAFE_STRATEGY_MILESTONE.md`
+- trading-preference rule reference: `docs/architecture/TRADING_PREFERENCE_PROFILES.md`
+- canonical crypto-window parity target: `docs/architecture/CRYPTO_WINDOW_PARITY_SPEC.md`
 - QA checklist: `docs/qa/PAPER_SAFE_STRATEGY_CHECKLIST.md`
 - Mullvad static checklist: `docs/qa/MULLVAD_SOCKS5_STATIC_CHECKLIST.md`
 - operator runbook and warnings: `docs/runbooks/PAPER_SAFE_OPERATOR_RUNBOOK.md`
@@ -166,12 +170,14 @@ Reference files:
 - set `PHANTOM3_V2_POLYMARKET_OPERATOR_ELIGIBILITY` explicitly and do not use proxy settings for geoblock bypass
 - control endpoints require `X-Phantom3-Token` or `Authorization: Bearer <token>`
 - change `PHANTOM3_V2_CONTROL_TOKEN` before any shared use
+- selecting a legacy trading preference may enable paper-only partial parity foundations, but does **not** mean the current runtime has full legacy parity or that live trading is enabled
 - do **not** expose this app to the public internet, keep it on localhost, LAN, or a trusted private tunnel
 - the optional Mullvad SOCKS5 path only affects explicitly proxied container traffic, not the host machine
 - proxy exit geography does not change venue rules, geoblocks, or compliance obligations
 - live mode is not implemented in this bootstrap
 - a passing `npm run verify:paper-safe` only confirms static guardrails and docs markers, not trading safety or readiness
 - `npm run verify:paper-runtime` is a local smoke test for ledger projection invariants, bootstrap restart truth, and the sanitized paper API shape
+- `npm run verify:trading-preference` is a local scenario verifier for token-gated control behavior, persisted preference state, honest legacy-reference exposure, and doc-backed parity thresholds
 
 ## Repo layout
 
@@ -200,6 +206,7 @@ scripts/
   prepare-mullvad-wireguard-config.sh select and stage one untracked WireGuard config for containers
   verify-paper-runtime.ts
   verify-paper-safe.mjs
+  verify-trading-preference.ts
   verify-mullvad-config-safety.mjs
   verify-mullvad-socks5.mjs
   launchd/

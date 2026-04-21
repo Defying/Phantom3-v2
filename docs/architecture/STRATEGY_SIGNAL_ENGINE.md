@@ -88,8 +88,9 @@ This gives Phantom3 v2 a strategy-core module that is:
 That runtime layer:
 - keeps the original entry-side exit constraints in paper intent metadata
 - derives a conservative position-level paper exit plan from open lots
+- can overlay a paper-only legacy managed exit model when the `legacy-early-exit-live` preference is selected
 - exposes typed exit state on each open paper position
-- submits only reduce-only paper exits when take-profit, stop-loss, time, or invalidation conditions trigger
+- submits only reduce-only paper exits when the relevant paper trigger family fires
 
 This keeps the strategy engine itself read-only while still letting the paper runtime close positions truthfully and conservatively.
 

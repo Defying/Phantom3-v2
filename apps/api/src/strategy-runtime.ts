@@ -6,6 +6,7 @@ import type {
   RuntimeMarket,
   RuntimeState,
   StrategyCandidate,
+  StrategyRoutingSummary,
   StrategyRuntimeStatus,
   StrategyRuntimeSummary,
   StrategyStateSnapshot
@@ -14,6 +15,7 @@ import type { ProjectedPosition } from '../../../packages/ledger/src/index.js';
 import type { PaperQuote } from '../../../packages/paper-execution/src/index.js';
 import type { PaperRiskDecision, PositionSnapshot, RiskMarketSnapshot } from '../../../packages/risk/src/index.js';
 import type { EvaluatedMarketSignal, PaperTradeIntent, StrategySignalReport } from '../../../packages/strategy/src/index.js';
+import { resolveStrategyRuntimeRoute } from '../../../packages/strategy/src/index.js';
 
 const STRATEGY_ENGINE_ID = 'paper-strategy-runtime';
 const STRATEGY_VERSION = 'paper-signal-v1';
@@ -29,7 +31,7 @@ export type StrategyEvaluationPayload = {
   lastEvaluatedAt?: string | null;
 };
 
-type StrategyStateBasis = Pick<RuntimeState, 'mode' | 'paused' | 'marketData' | 'markets'>;
+type StrategyStateBasis = Pick<RuntimeState, 'mode' | 'paused' | 'marketData' | 'markets' | 'tradingPreference'>;
 
 function clamp(value: number, minimum: number, maximum: number): number {
   return Math.min(Math.max(value, minimum), maximum);
@@ -106,6 +108,25 @@ function selectCandidates(report: StrategySignalReport | null): StrategyCandidat
   const accepted = report.accepted.map(toStrategyCandidate);
   const rejected = report.rejected.map(toStrategyCandidate);
   return [...accepted, ...rejected].slice(0, MAX_STRATEGY_CANDIDATES);
+}
+
+function buildRoutingSummary(state: StrategyStateBasis): StrategyRoutingSummary {
+  const route = resolveStrategyRuntimeRoute(state.tradingPreference.selected.profile);
+  const evaluatedStrategyVersion = route.evaluated.strategyVersion;
+
+  return {
+    requestedProfile: route.requested.profile,
+    requestedLabel: route.requested.label,
+    evaluatedProfile: route.evaluated.profile,
+    evaluatedLabel: route.evaluated.label,
+    strategyId: route.evaluated.strategyId,
+    strategyVersion: evaluatedStrategyVersion,
+    selectionMode: route.evaluated.selectionMode,
+    executionMode: route.executionMode,
+    entryPolicy: route.entryPolicy,
+    summary: route.summary,
+    note: route.note
+  };
 }
 
 export function createRuntimeIntentId(intent: PaperTradeIntent): string {
@@ -286,27 +307,37 @@ function buildSummaryText(
   payload: StrategyEvaluationPayload,
   exposureUsd: number
 ): string {
+  const routing = buildRoutingSummary(state);
+  const openIntentCount = payload.intents.filter((intent) => intent.status === 'submitted' || intent.status === 'watching').length;
+
   if (state.mode !== 'paper') {
     return 'Strategy runtime stays sanitized until the process is explicitly armed for paper mode.';
   }
   if (state.paused) {
-    return 'Paper strategy runtime is paused. Existing paper state is preserved and no new evaluations are emitted.';
+    return `${routing.requestedLabel} is selected, but the paper runtime is paused. Existing paper state is preserved and no new evaluations are emitted.`;
   }
   if (state.marketData.stale) {
     return state.marketData.error
-      ? `Paper strategy runtime is waiting on fresh market data: ${state.marketData.error}`
-      : 'Paper strategy runtime is waiting on fresh market data before evaluation.';
+      ? `${routing.requestedLabel} is waiting on fresh market data: ${state.marketData.error}`
+      : `${routing.requestedLabel} is waiting on fresh market data before evaluation.`;
   }
   if (state.markets.length === 0) {
-    return 'Paper strategy runtime is booted with no markets to observe yet.';
+    return `${routing.requestedLabel} is selected, but there are no markets to observe yet.`;
   }
-  const openIntentCount = payload.intents.filter((intent) => intent.status === 'submitted' || intent.status === 'watching').length;
-  return `Paper strategy is watching ${state.markets.length} markets, carrying ${openIntentCount} open paper intents, ${payload.positions.length} open paper positions, and ${compactUsd(exposureUsd)} open exposure.`;
+
+  if (routing.executionMode === 'reference-only') {
+    return `${routing.requestedLabel} is reference-only. The runtime is still scoring ${state.markets.length} markets with ${routing.evaluatedLabel} for visibility, carrying ${payload.positions.length} open paper positions, ${openIntentCount} open paper intents, and ${compactUsd(exposureUsd)} open exposure while new entry emission stays parked.`;
+  }
+
+  return `${routing.requestedLabel} is active across ${state.markets.length} watched markets, ${openIntentCount} open paper intents, ${payload.positions.length} open paper positions, and ${compactUsd(exposureUsd)} open exposure.`;
 }
 
 function buildNotes(state: StrategyStateBasis, payload: StrategyEvaluationPayload): string[] {
+  const routing = buildRoutingSummary(state);
   const notes = [
     'Paper-only runtime. No real exchange writes are performed.',
+    routing.summary,
+    routing.note,
     'Strategy signals are conservative heuristics, not proof of edge.'
   ];
 
@@ -340,13 +371,15 @@ export function createStrategyRuntimeSummary(
     (sum, position) => sum + position.quantity * (position.markPrice ?? position.averageEntryPrice),
     0
   );
+  const routing = buildRoutingSummary(state);
 
   return {
     engineId: STRATEGY_ENGINE_ID,
-    strategyVersion: payload.report?.engine.strategyVersion ?? STRATEGY_VERSION,
+    strategyVersion: payload.report?.engine.strategyVersion ?? routing.strategyVersion ?? STRATEGY_VERSION,
     mode: state.mode,
     status: deriveStrategyStatus(state),
     safeToExpose: true,
+    routing,
     lastEvaluatedAt: payload.lastEvaluatedAt ?? state.marketData.syncedAt ?? latestSnapshot?.createdAt ?? null,
     lastSnapshotAt: latestSnapshot?.createdAt ?? null,
     watchedMarketCount: state.markets.length,
