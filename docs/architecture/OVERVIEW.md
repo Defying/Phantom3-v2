@@ -5,7 +5,7 @@ This repo is the first executable milestone of the Phantom3 v2 rebuild.
 ## Implemented today
 
 - phone-accessible dashboard
-- read-only Polymarket market snapshot adapter
+- read-only Polymarket market snapshot adapter with explicit, venue-scoped transport controls
 - paper-safe snapshot strategy signal engine
 - pure paper-trading risk evaluation module
 - append-only paper ledger and paper execution adapter

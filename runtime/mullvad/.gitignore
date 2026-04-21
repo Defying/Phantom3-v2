@@ -1,0 +1,5 @@
+# Local Mullvad inputs live here at runtime only.
+# Keep generated files, extracted configs, and copied vendor zips out of git.
+*
+!.gitignore
+!README.md

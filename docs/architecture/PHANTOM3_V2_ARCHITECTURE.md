@@ -96,6 +96,7 @@ Rules:
 
 Owns:
 - Polymarket market discovery
+- explicit venue-scoped transport selection for Polymarket reads
 - token/market normalization
 - order book snapshots or best executable price
 - websocket subscriptions where available

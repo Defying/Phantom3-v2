@@ -18,8 +18,9 @@ import type {
 } from '../../../packages/contracts/src/index.js';
 import { strategyRuntimeSummarySchema, strategyStateSnapshotSchema } from '../../../packages/contracts/src/index.js';
 import { getOpenOrders, JsonlLedger, positionKeyFor, type IntentApprovedEvent, type LedgerProjection, type ProjectedOrder, type ProjectedPosition } from '../../../packages/ledger/src/index.js';
-import { fetchTopMarkets, type MarketSnapshot } from '../../../packages/market-data/src/index.js';
+import { describePolymarketAccess, describePolymarketTransport, fetchTopMarkets, type MarketSnapshot } from '../../../packages/market-data/src/index.js';
 import { PaperExecutionAdapter, type ApprovedTradeIntent } from '../../../packages/paper-execution/src/index.js';
+import { OutboundTransport } from '../../../packages/transport/src/index.js';
 import { createPaperRiskConfig, evaluatePaperTradeRisk, type PaperRiskDecision } from '../../../packages/risk/src/index.js';
 import { buildStrategySignalReport, type BinarySide, type PaperTradeIntent, type StrategyExitConstraints } from '../../../packages/strategy/src/index.js';
 import {
@@ -122,6 +123,91 @@ function strategyModuleStatus(strategy: StrategyRuntimeSummary): RuntimeModule['
   return 'idle';
 }
 
+function buildMarketDataState(config: AppConfig, overrides: Partial<RuntimeMarketData> = {}): RuntimeMarketData {
+  const transport = overrides.transport ?? describePolymarketTransport({ proxyUrl: config.polymarketProxyUrl });
+  const access = overrides.access ?? describePolymarketAccess({ operatorEligibility: config.polymarketOperatorEligibility });
+  const base: RuntimeMarketData = {
+    source: 'Polymarket Gamma + CLOB',
+    syncedAt: null,
+    stale: true,
+    refreshIntervalMs: config.marketRefreshMs,
+    error: access.operatorEligibility === 'restricted'
+      ? access.note
+      : 'No live market snapshot yet.',
+    transport,
+    access
+  };
+
+  const nextState: RuntimeMarketData = {
+    ...base,
+    ...overrides,
+    refreshIntervalMs: config.marketRefreshMs,
+    transport,
+    access
+  };
+
+  if (access.operatorEligibility === 'restricted') {
+    nextState.stale = true;
+    nextState.error = access.note;
+  }
+
+  return nextState;
+}
+
+function marketDataModuleStatus(state: RuntimeState): RuntimeModule['status'] {
+  if (state.marketData.access.operatorEligibility === 'restricted') {
+    return 'blocked';
+  }
+  return state.marketData.stale ? 'warning' : 'healthy';
+}
+
+function marketDataModuleSummary(state: RuntimeState): string {
+  if (state.marketData.access.operatorEligibility === 'restricted') {
+    return state.marketData.access.note;
+  }
+
+  if (state.marketData.stale) {
+    return state.marketData.error ?? `Waiting for a live Polymarket snapshot via ${state.marketData.transport.route === 'proxy' ? 'scoped SOCKS transport' : 'direct HTTPS transport'}.`;
+  }
+
+  return `Tracking ${state.markets.length} active markets from Polymarket Gamma + CLOB via ${state.marketData.transport.route === 'proxy' ? 'scoped SOCKS transport' : 'direct HTTPS transport'}.`;
+}
+
+function marketSnapshotWatchStatus(state: RuntimeState): WatchEntry['status'] {
+  if (state.marketData.access.operatorEligibility === 'restricted') {
+    return 'disabled';
+  }
+  return state.marketData.stale ? 'disabled' : 'active';
+}
+
+function marketSnapshotWatchNote(state: RuntimeState): string {
+  if (state.marketData.access.operatorEligibility === 'restricted') {
+    return state.marketData.access.note;
+  }
+
+  if (state.marketData.stale) {
+    return state.marketData.error ?? `Waiting on first Gamma + CLOB sync via ${state.marketData.transport.route === 'proxy' ? 'scoped SOCKS transport' : 'direct HTTPS transport'}.`;
+  }
+
+  return `Tracking ${state.markets.length} live markets on a ${Math.round(state.marketData.refreshIntervalMs / 1000)}s cadence via ${state.marketData.transport.route === 'proxy' ? 'scoped SOCKS transport' : 'direct HTTPS transport'}.`;
+}
+
+function venueAccessWatchStatus(state: RuntimeState): WatchEntry['status'] {
+  switch (state.marketData.access.operatorEligibility) {
+    case 'confirmed-eligible':
+      return 'active';
+    case 'restricted':
+      return 'disabled';
+    case 'unknown':
+    default:
+      return 'planned';
+  }
+}
+
+function venueAccessWatchNote(state: RuntimeState): string {
+  return `${state.marketData.access.note} ${state.marketData.transport.note}`;
+}
+
 function buildModules(state: RuntimeState): RuntimeModule[] {
   return [
     { id: 'config', name: 'Config Gate', status: 'healthy', summary: 'Environment parsed, remote controls token-gated.' },
@@ -137,10 +223,8 @@ function buildModules(state: RuntimeState): RuntimeModule[] {
     {
       id: 'market-data',
       name: 'Market Data Adapter',
-      status: state.marketData.stale ? 'warning' : 'healthy',
-      summary: state.marketData.stale
-        ? state.marketData.error ?? 'Waiting for a live Polymarket snapshot.'
-        : `Tracking ${state.markets.length} active markets from Polymarket Gamma + CLOB.`
+      status: marketDataModuleStatus(state),
+      summary: marketDataModuleSummary(state)
     },
     {
       id: 'strategy',
@@ -164,10 +248,14 @@ function buildWatchlist(state: RuntimeState): WatchEntry[] {
     {
       id: 'market-snapshot',
       label: 'Read-only market snapshot',
-      status: state.marketData.stale ? 'disabled' : 'active',
-      note: state.marketData.stale
-        ? state.marketData.error ?? 'Waiting on first Gamma + CLOB sync.'
-        : `Tracking ${state.markets.length} live markets on a ${Math.round(state.marketData.refreshIntervalMs / 1000)}s cadence.`
+      status: marketSnapshotWatchStatus(state),
+      note: marketSnapshotWatchNote(state)
+    },
+    {
+      id: 'venue-access',
+      label: 'Polymarket access policy',
+      status: venueAccessWatchStatus(state),
+      note: venueAccessWatchNote(state)
     },
     {
       id: 'paper-mode',
@@ -194,13 +282,7 @@ function buildWatchlist(state: RuntimeState): WatchEntry[] {
 
 function createInitialState(config: AppConfig): RuntimeState {
   const now = isoNow();
-  const marketData: RuntimeMarketData = {
-    source: 'Polymarket Gamma + CLOB',
-    syncedAt: null,
-    stale: true,
-    refreshIntervalMs: config.marketRefreshMs,
-    error: 'No live market snapshot yet.'
-  };
+  const marketData = buildMarketDataState(config);
 
   const state = {
     appName: 'Phantom3 v2',
@@ -254,6 +336,7 @@ export class RuntimeStore {
   private readonly statePath: string;
   private readonly ledger: JsonlLedger;
   private readonly paperExecution: PaperExecutionAdapter;
+  private readonly marketDataTransport: OutboundTransport;
   private state: RuntimeState;
   private strategySnapshots: StrategyStateSnapshot[] = [];
   private persistTimer: NodeJS.Timeout | null = null;
@@ -266,6 +349,7 @@ export class RuntimeStore {
     this.statePath = join(config.dataDir, 'runtime-state.json');
     this.ledger = new JsonlLedger({ directory: config.dataDir });
     this.paperExecution = new PaperExecutionAdapter(this.ledger);
+    this.marketDataTransport = new OutboundTransport({ proxy: config.polymarketProxy });
     this.state = createInitialState(config);
   }
 
@@ -357,13 +441,15 @@ export class RuntimeStore {
   private hydrateState(existing: PersistedRuntimeState): RuntimeState {
     const base = createInitialState(this.config);
     const { strategySnapshots: _strategySnapshots, strategy, ...rest } = existing;
-    const marketData = {
-      ...base.marketData,
-      ...(typeof existing.marketData === 'object' && existing.marketData ? existing.marketData : {}),
-      refreshIntervalMs: this.config.marketRefreshMs
-    } as RuntimeMarketData;
+    const marketData = buildMarketDataState(this.config, {
+      ...(typeof existing.marketData === 'object' && existing.marketData ? existing.marketData : {})
+    });
 
-    const markets = Array.isArray(existing.markets) ? existing.markets : base.markets;
+    const markets = this.config.polymarketOperatorEligibility === 'restricted'
+      ? base.markets
+      : Array.isArray(existing.markets)
+        ? existing.markets
+        : base.markets;
     const events = Array.isArray(existing.events) ? existing.events : base.events;
 
     const hydratedState = {
@@ -1136,17 +1222,19 @@ export class RuntimeStore {
     try {
       const snapshot = await fetchTopMarkets({
         limit: this.config.marketLimit,
-        timeoutMs: Math.min(Math.max(this.config.marketRefreshMs - 1000, 4000), 15000)
+        timeoutMs: Math.min(Math.max(this.config.marketRefreshMs - 1000, 4000), 15000),
+        transport: this.marketDataTransport,
+        operatorEligibility: this.config.polymarketOperatorEligibility
       });
 
       this.state.markets = snapshot.markets;
-      this.state.marketData = {
-        source: 'Polymarket Gamma + CLOB',
+      this.state.marketData = buildMarketDataState(this.config, {
         syncedAt: snapshot.fetchedAt,
         stale: false,
-        refreshIntervalMs: this.config.marketRefreshMs,
-        error: null
-      };
+        error: null,
+        transport: snapshot.transport,
+        access: snapshot.access
+      });
       await this.evaluateStrategy('market-refresh', snapshot);
       this.schedulePersist();
       this.notify();
@@ -1166,6 +1254,9 @@ export class RuntimeStore {
         stale: true,
         error: message
       };
+      if (this.state.marketData.access.operatorEligibility === 'restricted') {
+        this.state.markets = [];
+      }
       this.syncStrategyState('market-refresh-error', {
         ...this.currentStrategyPayload(),
         notes: [...this.currentStrategyPayload().notes ?? [], `Latest market refresh failed: ${message}`],

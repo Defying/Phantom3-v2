@@ -8,7 +8,9 @@ import process from 'node:process'
 import { RuntimeStore } from '../apps/api/src/runtime-store.js'
 import { paperStrategyViewSchema, runtimeStateSchema } from '../packages/contracts/src/index.js'
 import { getOpenOrders, JsonlLedger } from '../packages/ledger/src/index.js'
+import { fetchTopMarkets } from '../packages/market-data/src/index.js'
 import { PaperExecutionAdapter } from '../packages/paper-execution/src/index.js'
+import { parseSocksProxyUrl } from '../packages/transport/src/index.js'
 import type { AppConfig } from '../packages/config/src/index.js'
 import type { RuntimeMarket } from '../packages/contracts/src/index.js'
 
@@ -149,6 +151,14 @@ async function main(): Promise<void> {
       }
     })
 
+    await expect('restricted Polymarket eligibility fails closed before any live request', async () => {
+      await assert.rejects(
+        fetchTopMarkets({ limit: 1, operatorEligibility: 'restricted' }),
+        /Read-only market sync stays disabled/
+      )
+      return 'restricted eligibility blocked market-data preflight before network I/O'
+    })
+
     await expect('paper execution fills crossing quotes immediately', () => {
       assert.equal(buyResult.status, 'filled')
       assert.equal(sellResult.status, 'filled')
@@ -168,6 +178,7 @@ async function main(): Promise<void> {
     })
 
     await expect('runtime bootstrap rehydrates paper positions from ledger truth and keeps the API schema valid', async () => {
+      const proxy = parseSocksProxyUrl('socks5h://127.0.0.1:9050')
       const config = {
         host: '127.0.0.1',
         port: 4317,
@@ -177,6 +188,9 @@ async function main(): Promise<void> {
         logDir,
         marketRefreshMs: 30_000,
         marketLimit: 4,
+        polymarketProxy: proxy,
+        polymarketProxyUrl: proxy.url,
+        polymarketOperatorEligibility: 'confirmed-eligible',
         controlToken: 'paper-runtime-smoke-token'
       } satisfies AppConfig
 
@@ -188,6 +202,9 @@ async function main(): Promise<void> {
       assert.equal(state.mode, 'paper')
       assert.equal(state.strategy.positions.length, 1)
       assert.equal(state.strategy.openPositionCount, 1)
+      assert.equal(state.marketData.transport.route, 'proxy')
+      assert.equal(state.marketData.transport.scope, 'polymarket-only')
+      assert.equal(state.marketData.access.operatorEligibility, 'confirmed-eligible')
       assert.equal(state.modules.find((module) => module.id === 'ledger')?.status, 'healthy')
       assert.equal(state.watchlist.find((entry) => entry.id === 'paper-ledger')?.status, 'active')
       assert.equal(state.strategy.lastEvaluatedAt, '2026-04-20T20:05:00.000Z')

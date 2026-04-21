@@ -15,6 +15,7 @@ Implemented today:
 - phone-accessible dashboard
 - WebSocket runtime stream (`/api/ws`)
 - read-only Polymarket market snapshot (Gamma + CLOB midpoint data)
+- explicit, venue-scoped Polymarket transport controls with optional SOCKS5 routing
 - pure paper-trading risk evaluation module
 - bounded control API
 - file-backed bootstrap runtime state
@@ -32,6 +33,7 @@ Not implemented yet:
 ```bash
 cp .env.example .env
 # set a real PHANTOM3_V2_CONTROL_TOKEN first
+# optional: PHANTOM3_V2_POLYMARKET_PROXY_URL=socks5h://mullvad-socks5:1080
 npm install
 npm run runtime:preflight
 npm run verify:paper-runtime
@@ -94,20 +96,79 @@ Notes:
 - intended for localhost, LAN, or a trusted private tunnel, not the public internet
 - first boot may take a minute because it installs deps and builds the web bundle inside the container
 
+## Optional scoped Polymarket proxy
+
+Phantom3 v2 can route only its outbound Polymarket venue traffic through an explicit SOCKS proxy without changing host networking or proxying dashboard access.
+
+```bash
+PHANTOM3_V2_POLYMARKET_PROXY_URL=socks5h://mullvad-socks5:1080
+PHANTOM3_V2_POLYMARKET_OPERATOR_ELIGIBILITY=confirmed-eligible
+```
+
+Notes:
+- only the Polymarket Gamma + CLOB market-data adapter uses `PHANTOM3_V2_POLYMARKET_PROXY_URL`
+- supports `socks5://` and `socks5h://`, prefer `socks5h://` when you want proxy-side DNS resolution
+- dashboard, control, health, Fastify binds, and in-browser requests stay direct
+- `PHANTOM3_V2_POLYMARKET_OPERATOR_ELIGIBILITY` is a read-only compliance scaffold: `unknown`, `confirmed-eligible`, or `restricted`
+- when eligibility is marked `restricted`, the runtime fails closed and disables Polymarket sync instead of trying to route around venue policy
+- do not use this setting for geoblock bypass behavior
+
+## Container-only Mullvad SOCKS5 path
+
+Use Docker Compose for the Mullvad egress path. This is a container-scoped deployment option for venue traffic, not a host VPN.
+
+1. prepare the untracked WireGuard input from your Mullvad zip or `.conf`:
+
+```bash
+./scripts/prepare-mullvad-wireguard-config.sh --source /path/to/mullvad-wireguard.zip --select <config-name>.conf
+```
+
+2. review the safe local-input docs in `docs/runbooks/MULLVAD_WIREGUARD_CONTAINER_INPUTS.md`
+3. run the static checks:
+
+```bash
+npm run verify:mullvad-config-safety
+npm run verify:mullvad-socks5
+```
+
+4. deploy with the compose overlay in `docker-compose.mullvad.example.yml`
+
+Boundary rules:
+- only Phantom3 traffic that is explicitly configured for the SOCKS5 path uses the Mullvad sidecar
+- the host machine, browser, shell, and unrelated containers stay on their normal network path
+- keep localhost and other private/internal destinations out of the proxy path
+- never commit vendor zips or selected WireGuard configs
+
+Reference files:
+- Compose overlay: `docker-compose.mullvad.example.yml`
+- Static verifier model: `docker-compose.mullvad-socks5.example.yml`
+- Static env example: `.env.mullvad-socks5.example`
+- Mount snippet: `examples/mullvad/mount-snippet.example.yml`
+- Static checklist: `docs/qa/MULLVAD_SOCKS5_STATIC_CHECKLIST.md`
+- Compose runbook: `docs/runbooks/MULLVAD_SOCKS5_COMPOSE_RUNBOOK.md`
+- Legacy sidecar notes: `docs/runbooks/MULLVAD_SOCKS5_COMPOSE.md`
+
 ## Paper-safe strategy docs
 
 - milestone definition: `docs/milestones/PAPER_SAFE_STRATEGY_MILESTONE.md`
 - QA checklist: `docs/qa/PAPER_SAFE_STRATEGY_CHECKLIST.md`
+- Mullvad static checklist: `docs/qa/MULLVAD_SOCKS5_STATIC_CHECKLIST.md`
 - operator runbook and warnings: `docs/runbooks/PAPER_SAFE_OPERATOR_RUNBOOK.md`
+- container-only Mullvad input handling: `docs/runbooks/MULLVAD_WIREGUARD_CONTAINER_INPUTS.md`
+- Mullvad SOCKS5 Compose runbook: `docs/runbooks/MULLVAD_SOCKS5_COMPOSE_RUNBOOK.md`
 
 ## Important safety notes
 
 - this milestone is observer-first and paper-only
 - dashboard runtime updates stream over WebSocket at `/api/ws`
 - market discovery is read-only and refreshes from Polymarket Gamma + CLOB on a timed cadence
+- `PHANTOM3_V2_POLYMARKET_PROXY_URL` only affects the Polymarket market-data adapter, not the dashboard or control plane
+- set `PHANTOM3_V2_POLYMARKET_OPERATOR_ELIGIBILITY` explicitly and do not use proxy settings for geoblock bypass
 - control endpoints require `X-Phantom3-Token` or `Authorization: Bearer <token>`
 - change `PHANTOM3_V2_CONTROL_TOKEN` before any shared use
 - do **not** expose this app to the public internet, keep it on localhost, LAN, or a trusted private tunnel
+- the optional Mullvad SOCKS5 path only affects explicitly proxied container traffic, not the host machine
+- proxy exit geography does not change venue rules, geoblocks, or compliance obligations
 - live mode is not implemented in this bootstrap
 - a passing `npm run verify:paper-safe` only confirms static guardrails and docs markers, not trading safety or readiness
 - `npm run verify:paper-runtime` is a local smoke test for ledger projection invariants, bootstrap restart truth, and the sanitized paper API shape
@@ -118,23 +179,35 @@ Notes:
 apps/
   api/         Fastify API + static dashboard hosting
   web/         React/Vite mobile dashboard
+examples/
+  mullvad/     env + mount snippets for runtime-only WireGuard inputs
 packages/
   config/      runtime config helpers
   contracts/   shared runtime shapes/types
   ledger/      planned durable ledger package (placeholder)
   market-data/ read-only Polymarket market snapshot adapter
   risk/        pure paper-trading risk evaluation
+  transport/   proxy-aware outbound HTTP/WebSocket transport helpers
 docs/
   architecture/
   milestones/
   qa/
   runbooks/
+runtime/
+  mullvad/     gitignored local vendor inputs and generated mount files
 scripts/
-  phantom3-runtime.sh  local runtime helper (preflight/start/stop/status/logs/launchd-print)
+  phantom3-runtime.sh                 local runtime helper (preflight/start/stop/status/logs/launchd-print)
+  prepare-mullvad-wireguard-config.sh select and stage one untracked WireGuard config for containers
   verify-paper-runtime.ts
   verify-paper-safe.mjs
+  verify-mullvad-config-safety.mjs
+  verify-mullvad-socks5.mjs
   launchd/
     io.phantom3.v2.paper-runtime.plist.template
+docker/
+  mullvad/      userspace WireGuard + SOCKS5 sidecar config and ignored secret inputs
 
 docker-compose.example.yml
+docker-compose.mullvad.example.yml
+docker-compose.mullvad-socks5.example.yml
 ```

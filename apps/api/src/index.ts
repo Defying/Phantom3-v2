@@ -100,7 +100,7 @@ async function main(): Promise<void> {
     strategySummaryEndpoint: '/api/runtime/strategy',
     paperStrategyEndpoint: '/api/paper/strategy',
     paperStrategySnapshotsEndpoint: '/api/paper/strategy/snapshots',
-    note: 'Read endpoints are open. Paper strategy routes are sanitized and read-only. Control routes require a token.'
+    note: 'Read endpoints are open. Paper strategy routes are sanitized and read-only. Control routes require a token. Polymarket transport, if configured, is scoped to the market-data adapter only.'
   }));
 
   app.get('/api/ws', { websocket: true }, (socket) => {

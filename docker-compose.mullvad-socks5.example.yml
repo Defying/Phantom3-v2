@@ -1,26 +1,24 @@
-# Optional container-only Mullvad input flow:
-# 1. Prepare an untracked WireGuard file with:
-#    ./scripts/prepare-mullvad-wireguard-config.sh --source /path/to/mullvad-wireguard.zip --select <config-name>.conf
-# 2. Mount ./runtime/mullvad/wireguard.conf read-only into your proxy/VPN sidecar.
-#    See examples/mullvad/mount-snippet.example.yml and docs/runbooks/MULLVAD_WIREGUARD_CONTAINER_INPUTS.md.
-
 services:
   phantom3-v2:
     image: node:25-bookworm
     working_dir: /app
     init: true
     restart: unless-stopped
+    depends_on:
+      - mullvad-socks5
     ports:
       - "4317:4317"
     env_file:
-      - ${PHANTOM3_V2_ENV_FILE:-./.env}
+      - ${PHANTOM3_V2_ENV_FILE:-./.env.example}
     environment:
       PHANTOM3_V2_HOST: 0.0.0.0
       PHANTOM3_V2_PORT: 4317
       PHANTOM3_V2_DATA_DIR: /runtime/data
       PHANTOM3_V2_LOG_DIR: /runtime/logs
-      PHANTOM3_V2_POLYMARKET_PROXY_URL: ${PHANTOM3_V2_POLYMARKET_PROXY_URL:-}
+      PHANTOM3_V2_POLYMARKET_PROXY_URL: ${PHANTOM3_V2_POLYMARKET_PROXY_URL:-socks5h://mullvad-socks5:1080}
       PHANTOM3_V2_POLYMARKET_OPERATOR_ELIGIBILITY: ${PHANTOM3_V2_POLYMARKET_OPERATOR_ELIGIBILITY:-unknown}
+    security_opt:
+      - no-new-privileges:true
     volumes:
       - ./:/app
       - phantom3_v2_node_modules:/app/node_modules
@@ -48,6 +46,35 @@ services:
       timeout: 5s
       retries: 5
       start_period: 45s
+
+  mullvad-socks5:
+    image: ghcr.io/windtf/wireproxy:3792cd42b2ffb9653fb4beb3fe9c66d1512f9ce0
+    init: true
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp
+    expose:
+      - "1080"
+    command:
+      - -c
+      - /etc/wireproxy/wireproxy.conf
+    volumes:
+      - type: bind
+        source: ./docker/mullvad/wireproxy.conf
+        target: /etc/wireproxy/wireproxy.conf
+        read_only: true
+    secrets:
+      - source: mullvad_wg_config
+        target: mullvad-wg.conf
+
+secrets:
+  mullvad_wg_config:
+    file: ${PHANTOM3_V2_MULLVAD_WIREGUARD_HOST_PATH:-./runtime/mullvad/wireguard.conf}
 
 volumes:
   phantom3_v2_node_modules:

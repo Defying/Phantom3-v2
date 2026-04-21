@@ -33,12 +33,31 @@ export const watchEntrySchema = z.object({
 });
 export type WatchEntry = z.infer<typeof watchEntrySchema>;
 
+export const marketDataTransportSchema = z.object({
+  route: z.enum(['direct', 'proxy']),
+  scope: z.literal('polymarket-only'),
+  note: z.string()
+});
+export type MarketDataTransport = z.infer<typeof marketDataTransportSchema>;
+
+export const polymarketOperatorEligibilitySchema = z.enum(['unknown', 'confirmed-eligible', 'restricted']);
+export type PolymarketOperatorEligibility = z.infer<typeof polymarketOperatorEligibilitySchema>;
+
+export const marketDataAccessSchema = z.object({
+  operatorEligibility: polymarketOperatorEligibilitySchema,
+  readOnly: z.literal(true),
+  note: z.string()
+});
+export type MarketDataAccess = z.infer<typeof marketDataAccessSchema>;
+
 export const runtimeMarketDataSchema = z.object({
   source: z.string(),
   syncedAt: z.string().nullable(),
   stale: z.boolean(),
   refreshIntervalMs: z.number().int().positive(),
-  error: z.string().nullable()
+  error: z.string().nullable(),
+  transport: marketDataTransportSchema,
+  access: marketDataAccessSchema
 });
 export type RuntimeMarketData = z.infer<typeof runtimeMarketDataSchema>;
 

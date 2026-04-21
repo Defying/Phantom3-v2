@@ -1,4 +1,12 @@
 import { z } from 'zod';
+import { parseSocksProxyUrl, type SocksProxyConfig } from '../../transport/src/index.js';
+
+const optionalTrimmedString = z.preprocess(
+  (value) => typeof value === 'string' && value.trim().length === 0 ? undefined : value,
+  z.string().trim().optional()
+);
+
+export type PolymarketOperatorEligibility = 'unknown' | 'confirmed-eligible' | 'restricted';
 
 const envSchema = z.object({
   PHANTOM3_V2_HOST: z.string().default('127.0.0.1'),
@@ -9,6 +17,8 @@ const envSchema = z.object({
   PHANTOM3_V2_LOG_DIR: z.string().default('./logs'),
   PHANTOM3_V2_MARKET_REFRESH_MS: z.coerce.number().int().positive().default(30000),
   PHANTOM3_V2_MARKET_LIMIT: z.coerce.number().int().positive().max(24).default(16),
+  PHANTOM3_V2_POLYMARKET_PROXY_URL: optionalTrimmedString,
+  PHANTOM3_V2_POLYMARKET_OPERATOR_ELIGIBILITY: z.enum(['unknown', 'confirmed-eligible', 'restricted']).default('unknown'),
   PHANTOM3_V2_CONTROL_TOKEN: z.string().min(16, 'PHANTOM3_V2_CONTROL_TOKEN must be at least 16 characters')
 });
 
@@ -21,11 +31,18 @@ export type AppConfig = {
   logDir: string;
   marketRefreshMs: number;
   marketLimit: number;
+  polymarketProxy: SocksProxyConfig | null;
+  polymarketProxyUrl: string | null;
+  polymarketOperatorEligibility: PolymarketOperatorEligibility;
   controlToken: string;
 };
 
 export function readConfig(): AppConfig {
   const parsed = envSchema.parse(process.env);
+  const polymarketProxy = parsed.PHANTOM3_V2_POLYMARKET_PROXY_URL
+    ? parseSocksProxyUrl(parsed.PHANTOM3_V2_POLYMARKET_PROXY_URL)
+    : null;
+
   return {
     host: parsed.PHANTOM3_V2_HOST,
     port: parsed.PHANTOM3_V2_PORT,
@@ -35,6 +52,9 @@ export function readConfig(): AppConfig {
     logDir: parsed.PHANTOM3_V2_LOG_DIR,
     marketRefreshMs: parsed.PHANTOM3_V2_MARKET_REFRESH_MS,
     marketLimit: parsed.PHANTOM3_V2_MARKET_LIMIT,
+    polymarketProxy,
+    polymarketProxyUrl: polymarketProxy?.url ?? null,
+    polymarketOperatorEligibility: parsed.PHANTOM3_V2_POLYMARKET_OPERATOR_ELIGIBILITY,
     controlToken: parsed.PHANTOM3_V2_CONTROL_TOKEN
   };
 }

@@ -1,8 +1,24 @@
 import type { RuntimeMarket } from '../../contracts/src/index.js';
+import { OutboundTransport } from '../../transport/src/index.js';
 
 const GAMMA_API_BASE = 'https://gamma-api.polymarket.com';
 const CLOB_API_BASE = 'https://clob.polymarket.com';
 const USER_AGENT = 'Phantom3-v2/0.1';
+const DIRECT_TRANSPORT = new OutboundTransport();
+
+export type PolymarketOperatorEligibility = 'unknown' | 'confirmed-eligible' | 'restricted';
+
+export type PolymarketTransportSummary = {
+  route: 'direct' | 'proxy';
+  scope: 'polymarket-only';
+  note: string;
+};
+
+export type PolymarketAccessSummary = {
+  operatorEligibility: PolymarketOperatorEligibility;
+  readOnly: true;
+  note: string;
+};
 
 type GammaEvent = {
   id: string | number;
@@ -36,6 +52,15 @@ type MidpointResponse = {
 export type MarketSnapshot = {
   fetchedAt: string;
   markets: RuntimeMarket[];
+  transport: PolymarketTransportSummary;
+  access: PolymarketAccessSummary;
+};
+
+export type FetchTopMarketsOptions = {
+  limit: number;
+  timeoutMs?: number;
+  transport?: OutboundTransport;
+  operatorEligibility?: PolymarketOperatorEligibility;
 };
 
 function asNumber(value: unknown): number | null {
@@ -66,35 +91,75 @@ function parseStringArray(value: unknown): string[] {
   return [];
 }
 
-async function getJson<T>(url: string, signal: AbortSignal): Promise<T> {
-  const response = await fetch(url, {
+export function describePolymarketTransport(options: { transport?: OutboundTransport | null; proxyUrl?: string | null } = {}): PolymarketTransportSummary {
+  const route = options.transport?.proxy || options.proxyUrl ? 'proxy' : 'direct';
+  return {
+    route,
+    scope: 'polymarket-only',
+    note: route === 'proxy'
+      ? 'Scoped SOCKS transport is enabled only for Polymarket Gamma + CLOB reads. Dashboard, control, and local health traffic stay direct.'
+      : 'Direct HTTPS transport is in use for Polymarket reads. Dashboard, control, and local health traffic remain off any venue proxy.'
+  };
+}
+
+export function describePolymarketAccess(options: { operatorEligibility?: PolymarketOperatorEligibility } = {}): PolymarketAccessSummary {
+  const operatorEligibility = options.operatorEligibility ?? 'unknown';
+  switch (operatorEligibility) {
+    case 'confirmed-eligible':
+      return {
+        operatorEligibility,
+        readOnly: true,
+        note: 'Operator marked Polymarket access as confirmed eligible. Runtime remains read-only and will not place live orders.'
+      };
+    case 'restricted':
+      return {
+        operatorEligibility,
+        readOnly: true,
+        note: 'Operator marked Polymarket access as restricted. Read-only market sync stays disabled instead of attempting bypass behavior.'
+      };
+    case 'unknown':
+    default:
+      return {
+        operatorEligibility: 'unknown',
+        readOnly: true,
+        note: 'Operator eligibility is still unconfirmed. Runtime stays read-only and does not attempt geoblock bypass behavior.'
+      };
+  }
+}
+
+async function getJson<T>(url: string, signal: AbortSignal, transport: OutboundTransport): Promise<T> {
+  return transport.getJson<T>(url, {
     signal,
     headers: {
       'user-agent': USER_AGENT,
       accept: 'application/json'
     }
   });
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status} for ${url}`);
-  }
-  return response.json() as Promise<T>;
 }
 
-async function fetchMidpoint(tokenId: string, signal: AbortSignal): Promise<number | null> {
+async function fetchMidpoint(tokenId: string, signal: AbortSignal, transport: OutboundTransport): Promise<number | null> {
   try {
-    const payload = await getJson<MidpointResponse>(`${CLOB_API_BASE}/midpoint?token_id=${tokenId}`, signal);
+    const payload = await getJson<MidpointResponse>(`${CLOB_API_BASE}/midpoint?token_id=${tokenId}`, signal, transport);
     return asNumber(payload.mid);
   } catch {
     return null;
   }
 }
 
-export async function fetchTopMarkets(options: { limit: number; timeoutMs?: number }): Promise<MarketSnapshot> {
+export async function fetchTopMarkets(options: FetchTopMarketsOptions): Promise<MarketSnapshot> {
+  const transport = options.transport ?? DIRECT_TRANSPORT;
+  const access = describePolymarketAccess({ operatorEligibility: options.operatorEligibility });
+  const transportSummary = describePolymarketTransport({ transport });
+
+  if (access.operatorEligibility === 'restricted') {
+    throw new Error(access.note);
+  }
+
   const { limit, timeoutMs = 8000 } = options;
   const signal = AbortSignal.timeout(timeoutMs);
   const fetchLimit = Math.max(limit * 4, 24);
   const url = `${GAMMA_API_BASE}/events?active=true&closed=false&limit=${fetchLimit}&order=volume_24hr&ascending=false`;
-  const events = await getJson<GammaEvent[]>(url, signal);
+  const events = await getJson<GammaEvent[]>(url, signal, transport);
 
   const selected: Array<{ event: GammaEvent; market: GammaMarket }> = [];
   const seen = new Set<string>();
@@ -125,8 +190,8 @@ export async function fetchTopMarkets(options: { limit: number; timeoutMs?: numb
     const tokenIds = parseStringArray(market.clobTokenIds);
     const outcomes = parseStringArray(market.outcomes);
     const [yesPrice, noPrice] = await Promise.all([
-      fetchMidpoint(tokenIds[0], signal),
-      fetchMidpoint(tokenIds[1], signal)
+      fetchMidpoint(tokenIds[0], signal, transport),
+      fetchMidpoint(tokenIds[1], signal, transport)
     ]);
 
     return {
@@ -151,6 +216,8 @@ export async function fetchTopMarkets(options: { limit: number; timeoutMs?: numb
 
   return {
     fetchedAt: new Date().toISOString(),
-    markets
+    markets,
+    transport: transportSummary,
+    access
   };
 }

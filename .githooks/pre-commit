@@ -1,0 +1,43 @@
+#!/bin/zsh
+set -euo pipefail
+
+repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+cd "$repo_root"
+
+typeset -a staged_files rejected_paths
+staged_files=("${(@f)$(git diff --cached --name-only --diff-filter=ACMR)}")
+(( ${#staged_files[@]} == 0 )) && exit 0
+
+for path in "${staged_files[@]}"; do
+  case "$path" in
+    runtime/mullvad/.gitignore|runtime/mullvad/README.md|examples/mullvad/*|docs/runbooks/MULLVAD_WIREGUARD_CONTAINER_INPUTS.md|scripts/prepare-mullvad-wireguard-config.sh)
+      continue
+      ;;
+    runtime/mullvad/*)
+      rejected_paths+=("$path")
+      continue
+      ;;
+  esac
+
+  if [[ "$path:l" == *mullvad* && "$path:e:l" == zip ]]; then
+    rejected_paths+=("$path")
+    continue
+  fi
+
+  if [[ "$path:e:l" == conf ]]; then
+    if git show ":$path" 2>/dev/null | LC_ALL=C /usr/bin/grep -Eq '^(\[Interface\]|PrivateKey[[:space:]]*=)'; then
+      rejected_paths+=("$path")
+    fi
+  fi
+done
+
+if (( ${#rejected_paths[@]} > 0 )); then
+  print -u2 -- 'error: refusing to commit likely Mullvad/WireGuard secret material:'
+  for path in "${rejected_paths[@]}"; do
+    print -u2 -- "  - $path"
+  done
+  print -u2 -- ''
+  print -u2 -- 'Move vendor zips and selected .conf files under runtime/mullvad/ or outside the repo.'
+  print -u2 -- 'Use ./scripts/prepare-mullvad-wireguard-config.sh to create the untracked runtime mount file.'
+  exit 1
+fi
