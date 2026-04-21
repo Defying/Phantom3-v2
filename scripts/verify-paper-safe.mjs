@@ -55,9 +55,11 @@ await expectFile('docs/qa/PAPER_SAFE_STRATEGY_CHECKLIST.md', 'QA checklist exist
 await expectFile('docs/runbooks/PAPER_SAFE_OPERATOR_RUNBOOK.md', 'operator runbook exists');
 
 await expectIncludes('package.json', '"verify:paper-safe"', 'package.json exposes the paper-safe verification command');
+await expectIncludes('package.json', '"verify:paper-runtime"', 'package.json exposes the paper runtime smoke verifier');
 await expectIncludes('README.md', 'docs/milestones/PAPER_SAFE_STRATEGY_MILESTONE.md', 'README links to the milestone doc');
 await expectIncludes('README.md', 'docs/qa/PAPER_SAFE_STRATEGY_CHECKLIST.md', 'README links to the QA checklist');
 await expectIncludes('README.md', 'docs/runbooks/PAPER_SAFE_OPERATOR_RUNBOOK.md', 'README links to the operator runbook');
+await expectIncludes('README.md', 'verify:paper-runtime', 'README documents the paper runtime smoke verifier');
 
 await expectMatch(
   'packages/config/src/index.ts',
@@ -72,6 +74,8 @@ await expectIncludes('apps/api/src/runtime-store.ts', 'Live execution intentiona
 await expectIncludes('packages/ledger/README.md', 'append-only paper ledger', 'ledger placeholder still calls for append-only paper truth');
 await expectIncludes('docs/milestones/PAPER_SAFE_STRATEGY_MILESTONE.md', 'It does **not** mean:', 'milestone doc includes explicit non-goals');
 await expectIncludes('docs/runbooks/PAPER_SAFE_OPERATOR_RUNBOOK.md', 'This repo is not live-trading ready.', 'operator runbook includes explicit live-trading warning');
+await expectIncludes('docs/qa/PAPER_SAFE_STRATEGY_CHECKLIST.md', 'verify:paper-runtime', 'QA checklist includes the paper runtime smoke verifier');
+await expectIncludes('docs/runbooks/PAPER_SAFE_OPERATOR_RUNBOOK.md', 'verify:paper-runtime', 'operator runbook includes the paper runtime smoke verifier');
 
 const passed = checks.filter((check) => check.ok).length;
 const failed = checks.length - passed;
@@ -85,7 +89,7 @@ for (const check of checks) {
 console.log('------------------------------');
 console.log(`Passed: ${passed}`);
 console.log(`Failed: ${failed}`);
-console.log('Note: this script only validates repository guardrails and documentation markers. It does not prove runtime safety, execution correctness, or trading readiness.');
+console.log('Note: this script only validates repository guardrails and documentation markers. Pair it with npm run verify:paper-runtime for a local smoke check of ledger truth, restart recovery, and the sanitized paper API shape.');
 
 if (failed > 0) {
   process.exit(1);

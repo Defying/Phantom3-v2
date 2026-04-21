@@ -43,10 +43,12 @@ npm install
 npm run build:web
 npm run check
 npm run verify:paper-safe
+npm run verify:paper-runtime
 npm run start
 ```
 
 Then confirm:
+- `npm run verify:paper-runtime` passed on the same commit you are about to run
 - `/api/health` returns healthy JSON
 - `/api/runtime` reports `mode: "paper"`
 - the runtime shows the execution path as blocked or disarmed

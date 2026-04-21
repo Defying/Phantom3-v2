@@ -9,7 +9,8 @@
     "check": "tsc --noEmit -p tsconfig.json",
     "dev": "tsx watch apps/api/src/index.ts",
     "start": "tsx apps/api/src/index.ts",
-    "verify:paper-safe": "node scripts/verify-paper-safe.mjs"
+    "verify:paper-safe": "node scripts/verify-paper-safe.mjs",
+    "verify:paper-runtime": "tsx scripts/verify-paper-runtime.ts"
   },
   "dependencies": {
     "@fastify/static": "^8.3.0",

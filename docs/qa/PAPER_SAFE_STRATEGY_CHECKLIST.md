@@ -11,6 +11,7 @@ Date: `__________________`
 - [ ] `npm run check` passes
 - [ ] `npm run build:web` passes
 - [ ] `npm run verify:paper-safe` passes
+- [ ] `npm run verify:paper-runtime` passes
 - [ ] README and milestone docs still state that live execution is not implemented
 - [ ] control token is not left at the example value in `.env`
 
@@ -61,6 +62,7 @@ These stay unchecked until strategy code exists.
 - [ ] every rejected intent includes a reason
 - [ ] every paper fill includes the fill assumption or model version used
 - [ ] open paper positions can be reconstructed after restart
+- [ ] the runtime smoke verifier still proves restart recovery from ledger truth
 - [ ] replay results are comparable to the recorded live observer session
 - [ ] one accepted paper trade can be traced end-to-end
 - [ ] one rejected paper trade can be traced end-to-end

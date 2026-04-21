@@ -35,6 +35,7 @@ npm install
 npm run build:web
 npm run check
 npm run verify:paper-safe
+npm run verify:paper-runtime
 npm run start
 ```
 
@@ -78,6 +79,7 @@ Notes:
 - do **not** expose this app to the public internet, keep it on localhost, LAN, or a trusted private tunnel
 - live mode is not implemented in this bootstrap
 - a passing `npm run verify:paper-safe` only confirms static guardrails and docs markers, not trading safety or readiness
+- `npm run verify:paper-runtime` is a local smoke test for ledger projection invariants, bootstrap restart truth, and the sanitized paper API shape
 
 ## Repo layout
 
@@ -97,6 +99,7 @@ docs/
   qa/
   runbooks/
 scripts/
+  verify-paper-runtime.ts
   verify-paper-safe.mjs
 
 docker-compose.example.yml
