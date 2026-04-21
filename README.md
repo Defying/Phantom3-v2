@@ -31,18 +31,48 @@ Not implemented yet:
 
 ```bash
 cp .env.example .env
-npm install
-npm run build:web
-npm run check
-npm run verify:paper-safe
-npm run start
+# set a real PHANTOM3_V2_CONTROL_TOKEN first
+npm run runtime:preflight
+npm run runtime:start
+npm run runtime:status
 ```
+
+The local runtime helper reads `.env`, resolves data and log directories relative to the repo, rebuilds the dashboard before startup, and checks `/api/health` instead of trusting a stale pid file.
+
+Useful follow-ups:
+
+```bash
+npm run runtime:logs
+npm run runtime:restart
+npm run runtime:stop
+```
+
+You can still run `npm run start` directly if you want a foreground process without the helper.
 
 Then open the dashboard at the configured public URL.
 
 Examples:
 - local machine: `http://127.0.0.1:4317`
 - phone on same LAN: `http://<your-server-host-or-lan-ip>:4317`
+
+### Optional macOS launchd autostart
+
+Render a repo-aware launchd plist with your current checkout path and env file:
+
+```bash
+mkdir -p ~/Library/LaunchAgents
+npm run runtime:launchd:print > ~/Library/LaunchAgents/io.phantom3.v2.paper-runtime.plist
+plutil -lint ~/Library/LaunchAgents/io.phantom3.v2.paper-runtime.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/io.phantom3.v2.paper-runtime.plist
+launchctl kickstart -k gui/$(id -u)/io.phantom3.v2.paper-runtime
+```
+
+To remove it later:
+
+```bash
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/io.phantom3.v2.paper-runtime.plist
+rm ~/Library/LaunchAgents/io.phantom3.v2.paper-runtime.plist
+```
 
 ## Docker Compose example
 
@@ -97,7 +127,10 @@ docs/
   qa/
   runbooks/
 scripts/
+  phantom3-runtime.sh  local runtime helper (preflight/start/stop/status/logs/launchd-print)
   verify-paper-safe.mjs
+  launchd/
+    io.phantom3.v2.paper-runtime.plist.template
 
 docker-compose.example.yml
 ```

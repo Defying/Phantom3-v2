@@ -19,7 +19,9 @@ Date: `__________________`
 - [ ] `cp .env.example .env`
 - [ ] set a fresh `PHANTOM3_V2_CONTROL_TOKEN`
 - [ ] confirm `PHANTOM3_V2_PUBLIC_BASE_URL` matches the operator access path
-- [ ] start the app with `npm run start`
+- [ ] `npm run runtime:preflight` passes
+- [ ] start the app with `npm run runtime:start`
+- [ ] `npm run runtime:status` reports a reachable endpoint
 - [ ] `GET /api/health` returns `ok: true`
 - [ ] `GET /api/runtime` reports `mode: "paper"`
 - [ ] `GET /api/runtime` shows `execution` as blocked or otherwise clearly disarmed

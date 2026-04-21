@@ -9,6 +9,13 @@
     "check": "tsc --noEmit -p tsconfig.json",
     "dev": "tsx watch apps/api/src/index.ts",
     "start": "tsx apps/api/src/index.ts",
+    "runtime:preflight": "./scripts/phantom3-runtime.sh preflight",
+    "runtime:start": "./scripts/phantom3-runtime.sh start",
+    "runtime:stop": "./scripts/phantom3-runtime.sh stop",
+    "runtime:restart": "./scripts/phantom3-runtime.sh restart",
+    "runtime:status": "./scripts/phantom3-runtime.sh status",
+    "runtime:logs": "./scripts/phantom3-runtime.sh logs",
+    "runtime:launchd:print": "./scripts/phantom3-runtime.sh launchd-print",
     "verify:paper-safe": "node scripts/verify-paper-safe.mjs"
   },
   "dependencies": {
