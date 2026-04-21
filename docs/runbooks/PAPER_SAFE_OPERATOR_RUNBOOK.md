@@ -39,18 +39,37 @@ Before starting a session:
 
 ```bash
 cp .env.example .env
-npm install
-npm run build:web
-npm run check
-npm run verify:paper-safe
-npm run start
+# set a fresh PHANTOM3_V2_CONTROL_TOKEN before continuing
+npm run runtime:preflight
+npm run runtime:start
+npm run runtime:status
 ```
+
+What the helper does:
+- loads `.env` from the repo root unless `PHANTOM3_V2_ENV_FILE` overrides it
+- writes pid and runtime logs under `PHANTOM3_V2_LOG_DIR`
+- rebuilds the dashboard before startup so the served UI matches the current checkout
+- checks `/api/health` instead of trusting a stale pid file
 
 Then confirm:
 - `/api/health` returns healthy JSON
 - `/api/runtime` reports `mode: "paper"`
 - the runtime shows the execution path as blocked or disarmed
 - unauthorized control requests fail with `401`
+
+Useful operator commands:
+
+```bash
+npm run runtime:logs
+npm run runtime:restart
+npm run runtime:stop
+```
+
+If you want the paper runtime to start at login on macOS, render the repo-aware launchd plist with:
+
+```bash
+npm run runtime:launchd:print > ~/Library/LaunchAgents/io.phantom3.v2.paper-runtime.plist
+```
 
 ## During a supervised paper session
 

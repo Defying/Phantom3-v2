@@ -1,14 +1,4 @@
-#!/bin/zsh
+#!/usr/bin/env bash
 set -euo pipefail
-export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
-ROOT="/Volumes/Carve/Projects/Phantom3-v2"
-cd "$ROOT"
-mkdir -p logs data
-print -r -- $$ > logs/server.pid
-if [[ ! -d node_modules ]]; then
-  npm install
-fi
-if [[ ! -f apps/web/dist/index.html ]]; then
-  npm run build:web
-fi
-exec npm run start >> logs/server.log 2>&1
+ROOT="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+exec "$ROOT/scripts/phantom3-runtime.sh" run "$@"
