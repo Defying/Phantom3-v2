@@ -44,6 +44,24 @@ Examples:
 - local machine: `http://127.0.0.1:4317`
 - phone on same LAN: `http://<your-server-host-or-lan-ip>:4317`
 
+## Docker Compose example
+
+A local Compose example lives at `docker-compose.example.yml`.
+
+```bash
+cp .env.example .env
+# set a real PHANTOM3_V2_CONTROL_TOKEN
+# set PHANTOM3_V2_PUBLIC_BASE_URL to your actual local/LAN URL
+
+docker compose -f docker-compose.example.yml up -d
+```
+
+Notes:
+- still paper-only, still not live-trading ready
+- keeps runtime logs and data in Docker-managed named volumes
+- intended for localhost, LAN, or a trusted private tunnel, not the public internet
+- first boot may take a minute because it installs deps and builds the web bundle inside the container
+
 ## Paper-safe strategy docs
 
 - milestone definition: `docs/milestones/PAPER_SAFE_STRATEGY_MILESTONE.md`
@@ -80,4 +98,6 @@ docs/
   runbooks/
 scripts/
   verify-paper-safe.mjs
+
+docker-compose.example.yml
 ```
