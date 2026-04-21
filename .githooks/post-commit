@@ -1,7 +1,2 @@
 #!/bin/zsh
-set -u
-repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
-script="$repo_root/scripts/notify-nate-commit.sh"
-[[ -x "$script" ]] || exit 0
-"$script" >/dev/null 2>&1 || true
 exit 0

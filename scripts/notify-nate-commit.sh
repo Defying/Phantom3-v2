@@ -26,9 +26,10 @@ recipient=$(git config --local --get notify.nateRecipient 2>/dev/null || true)
 
 repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
 repo_name=$(basename "$repo_root")
-full_hash=$(git rev-parse HEAD 2>/dev/null) || exit 0
-short_hash=$(git rev-parse --short=7 HEAD 2>/dev/null) || exit 0
-subject=$(git log -1 --pretty=%s 2>/dev/null) || exit 0
+target_commit="${1:-HEAD}"
+full_hash=$(git rev-parse "$target_commit" 2>/dev/null) || exit 0
+short_hash=$(git rev-parse --short=7 "$full_hash" 2>/dev/null) || exit 0
+subject=$(git log -1 --pretty=%s "$full_hash" 2>/dev/null) || exit 0
 remote=$(git remote get-url --push origin 2>/dev/null || git remote get-url origin 2>/dev/null || true)
 base_url=$(remote_to_https "$remote" 2>/dev/null || true)
 commit_url=""
