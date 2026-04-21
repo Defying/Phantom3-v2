@@ -1,25 +1,32 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { AppConfig } from '../../../packages/config/src/index.js';
 import type {
+  LedgerDiagnostics,
   PaperIntentSummary,
   PaperStrategyView,
+  PersistenceDiagnostics,
+  RejectReasonCount,
   RiskDecisionSummary,
+  RuntimeDiagnostics,
   RuntimeEvent,
+  RuntimeHealth,
   RuntimeMarket,
   RuntimeMarketData,
   RuntimeModule,
   RuntimeState,
+  StrategyEvaluationDiagnostics,
   StrategyRuntimeSummary,
   StrategyStateSnapshot,
+  StrategyStateTrigger,
   WatchEntry
 } from '../../../packages/contracts/src/index.js';
-import { strategyStateSnapshotSchema } from '../../../packages/contracts/src/index.js';
-import { getOpenOrders, JsonlLedger, positionKeyFor } from '../../../packages/ledger/src/index.js';
+import { runtimeDiagnosticsSchema, strategyStateSnapshotSchema } from '../../../packages/contracts/src/index.js';
+import { getOpenOrders, JsonlLedger, positionKeyFor, type LedgerProjection } from '../../../packages/ledger/src/index.js';
 import { fetchTopMarkets, type MarketSnapshot } from '../../../packages/market-data/src/index.js';
 import { PaperExecutionAdapter, type ApprovedTradeIntent } from '../../../packages/paper-execution/src/index.js';
 import { createPaperRiskConfig, evaluatePaperTradeRisk, type PaperRiskDecision } from '../../../packages/risk/src/index.js';
-import { buildStrategySignalReport, type PaperTradeIntent } from '../../../packages/strategy/src/index.js';
+import { buildStrategySignalReport, type PaperTradeIntent, type StrategySignalReport } from '../../../packages/strategy/src/index.js';
 import {
   MAX_STRATEGY_SNAPSHOTS,
   buildPaperStrategyView,
@@ -49,6 +56,10 @@ function event(level: RuntimeEvent['level'], message: string): RuntimeEvent {
 
 function clampSnapshotLimit(limit: number): number {
   return Math.min(Math.max(Math.trunc(limit), 1), MAX_STRATEGY_SNAPSHOTS);
+}
+
+function clampEventLimit(limit: number): number {
+  return Math.min(Math.max(Math.trunc(limit), 1), 40);
 }
 
 function strategyModuleStatus(strategy: StrategyRuntimeSummary): RuntimeModule['status'] {
@@ -186,6 +197,101 @@ function createInitialState(config: AppConfig): RuntimeState {
   return state;
 }
 
+function ageMs(timestamp: string | null, nowMs = Date.now()): number | null {
+  if (!timestamp) {
+    return null;
+  }
+
+  const parsed = Date.parse(timestamp);
+  if (!Number.isFinite(parsed)) {
+    return null;
+  }
+
+  return Math.max(0, Math.round(nowMs - parsed));
+}
+
+function durationSince(startedAtMs: number): number {
+  return Math.max(0, Math.round(Date.now() - startedAtMs));
+}
+
+type DiagnosticCounters = {
+  attemptCount: number;
+  successCount: number;
+  failureCount: number;
+};
+
+type MarketSyncMetrics = {
+  lastAttemptAt: string | null;
+  lastSuccessAt: string | null;
+  lastFailureAt: string | null;
+  lastDurationMs: number | null;
+  lastSuccessDurationMs: number | null;
+  lastFailureDurationMs: number | null;
+  consecutiveFailureCount: number;
+  lastMarketCount: number;
+  counters: DiagnosticCounters;
+};
+
+type StrategyMetrics = {
+  lastSnapshotTrigger: StrategyStateTrigger | null;
+  lastEvaluationTrigger: StrategyStateTrigger | null;
+  lastStartedAt: string | null;
+  lastCompletedAt: string | null;
+  lastSuccessAt: string | null;
+  lastDurationMs: number | null;
+  lastError: string | null;
+  latestSubmittedIntentCount: number;
+  counters: DiagnosticCounters;
+  lastReport: StrategySignalReport | null;
+};
+
+type PersistenceMetrics = {
+  lastScheduledAt: string | null;
+  lastStartedAt: string | null;
+  lastPersistedAt: string | null;
+  lastDurationMs: number | null;
+  inFlight: boolean;
+  lastError: string | null;
+  counters: DiagnosticCounters;
+};
+
+function createCounters(): DiagnosticCounters {
+  return {
+    attemptCount: 0,
+    successCount: 0,
+    failureCount: 0
+  };
+}
+
+function createEmptyLedgerProjection(): LedgerProjection {
+  return {
+    latestSequence: 0,
+    intents: new Map(),
+    orders: new Map(),
+    fills: [],
+    positions: new Map(),
+    positionEvents: [],
+    anomalies: []
+  };
+}
+
+function countRejectReasons(report: StrategySignalReport | null): RejectReasonCount[] {
+  if (!report) {
+    return [];
+  }
+
+  const counts = new Map<string, number>();
+  for (const candidate of report.rejected) {
+    for (const reason of candidate.rejectReasons) {
+      counts.set(reason, (counts.get(reason) ?? 0) + 1);
+    }
+  }
+
+  return [...counts.entries()]
+    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+    .map(([reason, count]) => ({ reason, count }));
+}
+
 type RuntimeListener = (state: RuntimeState) => void;
 type PersistedRuntimeState = Partial<RuntimeState> & { strategySnapshots?: unknown } & Record<string, unknown>;
 
@@ -200,6 +306,38 @@ export class RuntimeStore {
   private marketRefreshInFlight: Promise<void> | null = null;
   private marketSyncState: 'never' | 'ok' | 'error' = 'never';
   private lastMarketError: string | null = null;
+  private readonly marketSyncMetrics: MarketSyncMetrics = {
+    lastAttemptAt: null,
+    lastSuccessAt: null,
+    lastFailureAt: null,
+    lastDurationMs: null,
+    lastSuccessDurationMs: null,
+    lastFailureDurationMs: null,
+    consecutiveFailureCount: 0,
+    lastMarketCount: 0,
+    counters: createCounters()
+  };
+  private readonly strategyMetrics: StrategyMetrics = {
+    lastSnapshotTrigger: null,
+    lastEvaluationTrigger: null,
+    lastStartedAt: null,
+    lastCompletedAt: null,
+    lastSuccessAt: null,
+    lastDurationMs: null,
+    lastError: null,
+    latestSubmittedIntentCount: 0,
+    counters: createCounters(),
+    lastReport: null
+  };
+  private readonly persistenceMetrics: PersistenceMetrics = {
+    lastScheduledAt: null,
+    lastStartedAt: null,
+    lastPersistedAt: null,
+    lastDurationMs: null,
+    inFlight: false,
+    lastError: null,
+    counters: createCounters()
+  };
 
   constructor(private readonly config: AppConfig) {
     this.statePath = join(config.dataDir, 'runtime-state.json');
@@ -243,6 +381,41 @@ export class RuntimeStore {
   getPaperStrategyView(limit = 6): PaperStrategyView | null {
     const view = buildPaperStrategyView(this.state, this.strategySnapshots, clampSnapshotLimit(limit));
     return view ? structuredClone(view) : null;
+  }
+
+  getRecentEvents(limit = 10): RuntimeEvent[] {
+    return structuredClone(this.state.events.slice(0, clampEventLimit(limit)));
+  }
+
+  async getRuntimeDiagnostics(limit = 10): Promise<RuntimeDiagnostics> {
+    const [stateStats, ledgerStats, ledgerResult] = await Promise.all([
+      this.readFileStats(this.statePath),
+      this.readFileStats(this.ledger.filePath),
+      this.readLedgerProjectionSafely()
+    ]);
+
+    const generatedAt = isoNow();
+    const ledger = this.buildLedgerDiagnostics(ledgerResult.projection, ledgerStats.size, ledgerStats.lastModifiedAt);
+    if (ledgerResult.error) {
+      ledger.anomalies = [ledgerResult.error, ...ledger.anomalies].slice(0, 5);
+      ledger.anomalyCount = ledger.anomalies.length;
+    }
+
+    const marketSync = this.buildMarketSyncDiagnostics();
+    const strategyEvaluation = this.buildStrategyEvaluationDiagnostics();
+    const persistence = this.buildPersistenceDiagnostics(stateStats.size, stateStats.lastModifiedAt);
+    const runtime = this.buildRuntimeHealth(generatedAt, marketSync, strategyEvaluation, persistence, ledger);
+
+    return runtimeDiagnosticsSchema.parse({
+      safeToExpose: true,
+      generatedAt,
+      runtime,
+      marketSync,
+      strategyEvaluation,
+      persistence,
+      ledger,
+      recentEvents: this.getRecentEvents(limit)
+    });
   }
 
   subscribe(listener: RuntimeListener): () => void {
@@ -347,6 +520,8 @@ export class RuntimeStore {
     payload: StrategyEvaluationPayload,
     options: { recordSnapshot?: boolean } = {}
   ): void {
+    this.strategyMetrics.lastSnapshotTrigger = trigger;
+
     if (options.recordSnapshot !== false) {
       this.strategySnapshots = [createStrategyStateSnapshot(this.state, trigger, payload), ...this.strategySnapshots]
         .slice(0, MAX_STRATEGY_SNAPSHOTS);
@@ -355,11 +530,6 @@ export class RuntimeStore {
     this.state.strategy = createStrategyRuntimeSummary(this.state, this.strategySnapshots, payload);
     this.state.modules = buildModules(this.state);
     this.state.watchlist = buildWatchlist(this.state);
-  }
-
-  private summarizePositions(markets: RuntimeMarket[]): PaperIntentSummary[] {
-    void markets;
-    return [];
   }
 
   private marketMap(markets = this.state.markets): Map<string, RuntimeMarket> {
@@ -457,113 +627,142 @@ export class RuntimeStore {
   }
 
   private async evaluateStrategy(trigger: StrategyStateSnapshot['trigger'], snapshot: MarketSnapshot): Promise<void> {
-    const report = buildStrategySignalReport(snapshot);
-    const marketMap = this.marketMap(snapshot.markets);
-    let projection = await this.ledger.readProjection();
-    let positions = this.projectionPositionsToSummaries(projection, marketMap);
-    let riskPositions = positions.map(createRiskPositionSnapshot);
+    const startedAt = isoNow();
+    const startedAtMs = Date.now();
+    this.strategyMetrics.lastEvaluationTrigger = trigger;
+    this.strategyMetrics.lastStartedAt = startedAt;
+    this.strategyMetrics.counters.attemptCount += 1;
 
-    const riskDecisions: RiskDecisionSummary[] = [];
-    const intentSummaries: PaperIntentSummary[] = [];
-    const previousIntents = new Map(
-      this.currentStrategyPayload().intents.map((summary) => [`${summary.marketId}:${summary.side}`, summary] as const)
-    );
-    let submittedCount = 0;
+    try {
+      const report = buildStrategySignalReport(snapshot);
+      const marketMap = this.marketMap(snapshot.markets);
+      let projection = await this.ledger.readProjection();
+      let positions = this.projectionPositionsToSummaries(projection, marketMap);
+      let riskPositions = positions.map(createRiskPositionSnapshot);
 
-    for (const intent of report.intents) {
-      const market = marketMap.get(intent.marketId);
-      if (!market) {
-        continue;
-      }
+      const riskDecisions: RiskDecisionSummary[] = [];
+      const intentSummaries: PaperIntentSummary[] = [];
+      const previousIntents = new Map(
+        this.currentStrategyPayload().intents.map((summary) => [`${summary.marketId}:${summary.side}`, summary] as const)
+      );
+      let submittedCount = 0;
 
-      const riskMarket = createRiskMarketSnapshot(market, intent.side, snapshot.fetchedAt);
-      const quote = createPaperQuote(market, intent.side, snapshot.fetchedAt);
-      const tokenId = riskMarket.tokenId ?? `${market.id}:${intent.side}`;
-      const draftDecision = evaluatePaperTradeRisk({
-        intent: {
-          intentId: createRuntimeIntentId(intent),
-          strategyVersion: intent.strategyVersion,
-          marketId: intent.marketId,
-          tokenId,
-          side: intent.side,
-          desiredSizeUsd: intent.suggestedNotionalUsd,
-          maxEntryPrice: intent.entry.acceptablePriceBand.max,
-          reduceOnly: false
-        },
-        market: riskMarket,
-        positions: riskPositions,
-        config: createPaperRiskConfig({
-          maxPositionSizeUsd: 40,
-          perMarketExposureCapUsd: 50,
-          totalExposureCapUsd: 125,
-          maxSimultaneousPositions: 3,
-          maxSpreadBps: 600
-        }),
-        now: snapshot.fetchedAt
-      });
+      for (const intent of report.intents) {
+        const market = marketMap.get(intent.marketId);
+        if (!market) {
+          continue;
+        }
 
-      riskDecisions.push(this.buildRiskDecisionSummary(draftDecision, intent));
-
-      const previousSummary = previousIntents.get(`${intent.marketId}:${intent.side}`) ?? null;
-      let status: PaperIntentSummary['status'] = draftDecision.decision === 'approve' || draftDecision.decision === 'resize'
-        ? 'watching'
-        : 'draft';
-      let summaryId = previousSummary?.id;
-      let summaryCreatedAt = previousSummary?.createdAt;
-
-      if (quote && (draftDecision.decision === 'approve' || draftDecision.decision === 'resize') && this.shouldSubmitEntry(projection, market.id, tokenId, snapshot.fetchedAt)) {
-        const approvedIntent = this.createApprovedEntryIntent({
-          intent,
-          approvedSizeUsd: draftDecision.approvedSizeUsd,
-          limitPrice: intent.entry.acceptablePriceBand.max,
-          tokenId,
-          observedAt: snapshot.fetchedAt
+        const riskMarket = createRiskMarketSnapshot(market, intent.side, snapshot.fetchedAt);
+        const quote = createPaperQuote(market, intent.side, snapshot.fetchedAt);
+        const tokenId = riskMarket.tokenId ?? `${market.id}:${intent.side}`;
+        const draftDecision = evaluatePaperTradeRisk({
+          intent: {
+            intentId: createRuntimeIntentId(intent),
+            strategyVersion: intent.strategyVersion,
+            marketId: intent.marketId,
+            tokenId,
+            side: intent.side,
+            desiredSizeUsd: intent.suggestedNotionalUsd,
+            maxEntryPrice: intent.entry.acceptablePriceBand.max,
+            reduceOnly: false
+          },
+          market: riskMarket,
+          positions: riskPositions,
+          config: createPaperRiskConfig({
+            maxPositionSizeUsd: 40,
+            perMarketExposureCapUsd: 50,
+            totalExposureCapUsd: 125,
+            maxSimultaneousPositions: 3,
+            maxSpreadBps: 600
+          }),
+          now: snapshot.fetchedAt
         });
 
-        if (approvedIntent) {
-          await this.paperExecution.submitApprovedIntent({ intent: approvedIntent, quote });
-          projection = await this.ledger.readProjection();
-          positions = this.projectionPositionsToSummaries(projection, marketMap);
-          riskPositions = positions.map(createRiskPositionSnapshot);
-          status = 'submitted';
-          summaryId = approvedIntent.intentId;
-          summaryCreatedAt = approvedIntent.approvedAt;
-          submittedCount += 1;
+        riskDecisions.push(this.buildRiskDecisionSummary(draftDecision, intent));
+
+        const previousSummary = previousIntents.get(`${intent.marketId}:${intent.side}`) ?? null;
+        let status: PaperIntentSummary['status'] = draftDecision.decision === 'approve' || draftDecision.decision === 'resize'
+          ? 'watching'
+          : 'draft';
+        let summaryId = previousSummary?.id;
+        let summaryCreatedAt = previousSummary?.createdAt;
+
+        if (quote && (draftDecision.decision === 'approve' || draftDecision.decision === 'resize') && this.shouldSubmitEntry(projection, market.id, tokenId, snapshot.fetchedAt)) {
+          const approvedIntent = this.createApprovedEntryIntent({
+            intent,
+            approvedSizeUsd: draftDecision.approvedSizeUsd,
+            limitPrice: intent.entry.acceptablePriceBand.max,
+            tokenId,
+            observedAt: snapshot.fetchedAt
+          });
+
+          if (approvedIntent) {
+            await this.paperExecution.submitApprovedIntent({ intent: approvedIntent, quote });
+            projection = await this.ledger.readProjection();
+            positions = this.projectionPositionsToSummaries(projection, marketMap);
+            riskPositions = positions.map(createRiskPositionSnapshot);
+            status = 'submitted';
+            summaryId = approvedIntent.intentId;
+            summaryCreatedAt = approvedIntent.approvedAt;
+            submittedCount += 1;
+          }
         }
+
+        intentSummaries.push(
+          createEntryIntentSummary(
+            intent,
+            status,
+            draftDecision.approvedSizeUsd > 0 ? draftDecision.approvedSizeUsd : intent.suggestedNotionalUsd,
+            {
+              id: summaryId,
+              createdAt: summaryCreatedAt
+            }
+          )
+        );
       }
 
-      intentSummaries.push(
-        createEntryIntentSummary(
-          intent,
-          status,
-          draftDecision.approvedSizeUsd > 0 ? draftDecision.approvedSizeUsd : intent.suggestedNotionalUsd,
-          {
-            id: summaryId,
-            createdAt: summaryCreatedAt
-          }
-        )
-      );
+      const notes = [
+        'Append-only paper ledger is active for paper intents, orders, fills, and positions.',
+        submittedCount > 0
+          ? `Submitted ${submittedCount} new paper entry intent${submittedCount === 1 ? '' : 's'} on the latest evaluation.`
+          : 'No new paper entries were submitted on the latest evaluation.',
+        'Auto exits are not wired yet, so open paper positions stay open until a later milestone.'
+      ];
+
+      this.syncStrategyState(trigger, {
+        report,
+        intents: intentSummaries,
+        riskDecisions,
+        positions,
+        notes,
+        lastEvaluatedAt: snapshot.fetchedAt
+      });
+
+      this.strategyMetrics.lastCompletedAt = isoNow();
+      this.strategyMetrics.lastSuccessAt = snapshot.fetchedAt;
+      this.strategyMetrics.lastDurationMs = durationSince(startedAtMs);
+      this.strategyMetrics.lastError = null;
+      this.strategyMetrics.lastReport = report;
+      this.strategyMetrics.latestSubmittedIntentCount = submittedCount;
+      this.strategyMetrics.counters.successCount += 1;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown strategy evaluation error';
+      this.strategyMetrics.lastCompletedAt = isoNow();
+      this.strategyMetrics.lastDurationMs = durationSince(startedAtMs);
+      this.strategyMetrics.lastError = message;
+      this.strategyMetrics.counters.failureCount += 1;
+      throw error;
     }
-
-    const notes = [
-      'Append-only paper ledger is active for paper intents, orders, fills, and positions.',
-      submittedCount > 0
-        ? `Submitted ${submittedCount} new paper entry intent${submittedCount === 1 ? '' : 's'} on the latest evaluation.`
-        : 'No new paper entries were submitted on the latest evaluation.',
-      'Auto exits are not wired yet, so open paper positions stay open until a later milestone.'
-    ];
-
-    this.syncStrategyState(trigger, {
-      report,
-      intents: intentSummaries,
-      riskDecisions,
-      positions,
-      notes,
-      lastEvaluatedAt: snapshot.fetchedAt
-    });
   }
 
   private async doRefreshMarketData(): Promise<void> {
+    const startedAt = isoNow();
+    const startedAtMs = Date.now();
+    const wasOk = this.marketSyncState === 'ok';
+    this.marketSyncMetrics.lastAttemptAt = startedAt;
+    this.marketSyncMetrics.counters.attemptCount += 1;
+
     try {
       const snapshot = await fetchTopMarkets({
         limit: this.config.marketLimit,
@@ -582,9 +781,16 @@ export class RuntimeStore {
       this.schedulePersist();
       this.notify();
 
-      if (this.marketSyncState !== 'ok') {
-        this.marketSyncState = 'ok';
-        this.lastMarketError = null;
+      this.marketSyncMetrics.lastSuccessAt = snapshot.fetchedAt;
+      this.marketSyncMetrics.lastDurationMs = durationSince(startedAtMs);
+      this.marketSyncMetrics.lastSuccessDurationMs = this.marketSyncMetrics.lastDurationMs;
+      this.marketSyncMetrics.lastMarketCount = snapshot.markets.length;
+      this.marketSyncMetrics.consecutiveFailureCount = 0;
+      this.marketSyncMetrics.counters.successCount += 1;
+      this.marketSyncState = 'ok';
+      this.lastMarketError = null;
+
+      if (!wasOk) {
         this.pushEvent('info', `Read-only market snapshot is live for ${snapshot.markets.length} active markets.`);
       }
       return;
@@ -605,21 +811,29 @@ export class RuntimeStore {
       this.schedulePersist();
       this.notify();
 
+      this.marketSyncMetrics.lastFailureAt = isoNow();
+      this.marketSyncMetrics.lastDurationMs = durationSince(startedAtMs);
+      this.marketSyncMetrics.lastFailureDurationMs = this.marketSyncMetrics.lastDurationMs;
+      this.marketSyncMetrics.consecutiveFailureCount += 1;
+      this.marketSyncMetrics.counters.failureCount += 1;
+      this.marketSyncState = 'error';
+      this.lastMarketError = message;
+
       if (shouldRecordSnapshot) {
-        this.marketSyncState = 'error';
-        this.lastMarketError = message;
         this.pushEvent('warning', `Market-data refresh failed: ${message}`);
       }
     }
   }
 
   private schedulePersist(): void {
+    this.persistenceMetrics.lastScheduledAt = isoNow();
+
     if (this.persistTimer) {
       clearTimeout(this.persistTimer);
     }
     this.persistTimer = setTimeout(() => {
-      void this.persist();
       this.persistTimer = null;
+      void this.persist().catch(() => undefined);
     }, 50);
     this.persistTimer.unref();
   }
@@ -632,10 +846,202 @@ export class RuntimeStore {
   }
 
   private async persist(): Promise<void> {
-    await writeFile(
-      this.statePath,
-      `${JSON.stringify({ ...this.state, strategySnapshots: this.strategySnapshots }, null, 2)}\n`,
-      'utf8'
-    );
+    const startedAtMs = Date.now();
+    this.persistenceMetrics.lastStartedAt = isoNow();
+    this.persistenceMetrics.inFlight = true;
+    this.persistenceMetrics.counters.attemptCount += 1;
+
+    try {
+      await writeFile(
+        this.statePath,
+        `${JSON.stringify({ ...this.state, strategySnapshots: this.strategySnapshots }, null, 2)}\n`,
+        'utf8'
+      );
+      this.persistenceMetrics.lastPersistedAt = isoNow();
+      this.persistenceMetrics.lastDurationMs = durationSince(startedAtMs);
+      this.persistenceMetrics.lastError = null;
+      this.persistenceMetrics.counters.successCount += 1;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown persist error';
+      this.persistenceMetrics.lastDurationMs = durationSince(startedAtMs);
+      this.persistenceMetrics.lastError = message;
+      this.persistenceMetrics.counters.failureCount += 1;
+      this.state.events = [event('error', `Runtime state persist failed: ${message}`), ...this.state.events].slice(0, 40);
+      this.notify();
+      throw error;
+    } finally {
+      this.persistenceMetrics.inFlight = false;
+    }
+  }
+
+  private async readFileStats(path: string): Promise<{ size: number; lastModifiedAt: string | null }> {
+    try {
+      const info = await stat(path);
+      return {
+        size: Math.max(0, Math.trunc(info.size)),
+        lastModifiedAt: info.mtime ? info.mtime.toISOString() : null
+      };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') {
+        return { size: 0, lastModifiedAt: null };
+      }
+      throw error;
+    }
+  }
+
+  private async readLedgerProjectionSafely(): Promise<{ projection: LedgerProjection; error: string | null }> {
+    try {
+      return {
+        projection: await this.ledger.readProjection(),
+        error: null
+      };
+    } catch (error) {
+      return {
+        projection: createEmptyLedgerProjection(),
+        error: error instanceof Error ? error.message : 'Unknown ledger projection error'
+      };
+    }
+  }
+
+  private buildMarketSyncDiagnostics(): RuntimeDiagnostics['marketSync'] {
+    return {
+      safeToExpose: true,
+      state: this.marketSyncState,
+      stale: this.state.marketData.stale,
+      refreshInFlight: this.marketRefreshInFlight !== null,
+      refreshIntervalMs: this.state.marketData.refreshIntervalMs,
+      lastAttemptAt: this.marketSyncMetrics.lastAttemptAt,
+      lastSuccessAt: this.marketSyncMetrics.lastSuccessAt ?? this.state.marketData.syncedAt,
+      lastFailureAt: this.marketSyncMetrics.lastFailureAt,
+      lastDurationMs: this.marketSyncMetrics.lastDurationMs,
+      lastSuccessDurationMs: this.marketSyncMetrics.lastSuccessDurationMs,
+      lastFailureDurationMs: this.marketSyncMetrics.lastFailureDurationMs,
+      marketDataAgeMs: ageMs(this.state.marketData.syncedAt),
+      marketsInLatestSnapshot: this.marketSyncMetrics.lastMarketCount || this.state.markets.length,
+      counters: { ...this.marketSyncMetrics.counters },
+      consecutiveFailureCount: this.marketSyncMetrics.consecutiveFailureCount,
+      error: this.state.marketData.error ?? this.lastMarketError
+    };
+  }
+
+  private buildStrategyEvaluationDiagnostics(): RuntimeDiagnostics['strategyEvaluation'] {
+    const report = this.strategyMetrics.lastReport;
+    return {
+      safeToExpose: true,
+      engineId: this.state.strategy.engineId,
+      strategyVersion: this.state.strategy.strategyVersion,
+      status: this.state.strategy.status,
+      lastSnapshotTrigger: this.strategyMetrics.lastSnapshotTrigger,
+      lastEvaluationTrigger: this.strategyMetrics.lastEvaluationTrigger,
+      lastStartedAt: this.strategyMetrics.lastStartedAt,
+      lastCompletedAt: this.strategyMetrics.lastCompletedAt,
+      lastSuccessAt: this.strategyMetrics.lastSuccessAt,
+      lastDurationMs: this.strategyMetrics.lastDurationMs,
+      lastEvaluatedAt: this.state.strategy.lastEvaluatedAt,
+      lastError: this.strategyMetrics.lastError,
+      counters: { ...this.strategyMetrics.counters },
+      watchedMarketCount: this.state.strategy.watchedMarketCount,
+      candidateCount: this.state.strategy.candidateCount,
+      eligibleMarketCount: report?.totals.eligibleMarkets ?? 0,
+      rejectedMarketCount: report?.totals.rejectedMarkets ?? 0,
+      emittedIntentCount: report?.totals.emittedIntents ?? 0,
+      submittedIntentCount: this.strategyMetrics.latestSubmittedIntentCount,
+      openIntentCount: this.state.strategy.openIntentCount,
+      openPositionCount: this.state.strategy.openPositionCount,
+      openExposureUsd: this.state.strategy.openExposureUsd,
+      riskDecisionCount: this.state.strategy.riskDecisions.length,
+      rejectReasonBreakdown: countRejectReasons(report),
+      notes: [...this.state.strategy.notes]
+    };
+  }
+
+  private buildPersistenceDiagnostics(stateFileBytes: number, fileLastModifiedAt: string | null): RuntimeDiagnostics['persistence'] {
+    return {
+      safeToExpose: true,
+      statePath: this.statePath,
+      stateFileBytes,
+      pendingWrite: this.persistTimer !== null || this.persistenceMetrics.inFlight,
+      lastScheduledAt: this.persistenceMetrics.lastScheduledAt,
+      lastStartedAt: this.persistenceMetrics.lastStartedAt,
+      lastPersistedAt: this.persistenceMetrics.lastPersistedAt ?? fileLastModifiedAt,
+      lastDurationMs: this.persistenceMetrics.lastDurationMs,
+      counters: { ...this.persistenceMetrics.counters },
+      lastError: this.persistenceMetrics.lastError
+    };
+  }
+
+  private buildLedgerDiagnostics(projection: LedgerProjection, fileBytes: number, lastAppendedAt: string | null): RuntimeDiagnostics['ledger'] {
+    const openPositionCount = [...projection.positions.values()].filter((position) => position.status === 'open' && position.netQuantity > 0).length;
+    return {
+      safeToExpose: true,
+      filePath: this.ledger.filePath,
+      fileBytes,
+      latestSequence: projection.latestSequence,
+      lastAppendedAt,
+      intentCount: projection.intents.size,
+      orderCount: projection.orders.size,
+      openOrderCount: getOpenOrders(projection).length,
+      fillCount: projection.fills.length,
+      positionCount: projection.positions.size,
+      openPositionCount,
+      positionEventCount: projection.positionEvents.length,
+      anomalyCount: projection.anomalies.length,
+      anomalies: projection.anomalies.slice(0, 5)
+    };
+  }
+
+  private buildRuntimeHealth(
+    generatedAt: string,
+    marketSync: RuntimeDiagnostics['marketSync'],
+    strategyEvaluation: RuntimeDiagnostics['strategyEvaluation'],
+    persistence: RuntimeDiagnostics['persistence'],
+    ledger: RuntimeDiagnostics['ledger']
+  ): RuntimeHealth {
+    const warnings: string[] = [];
+
+    if (this.state.paused) {
+      warnings.push('Runtime is paused by operator.');
+    }
+    if (marketSync.state === 'never') {
+      warnings.push('Runtime is still waiting for the first successful market sync.');
+    }
+    if (this.state.marketData.stale) {
+      warnings.push(this.state.marketData.error ? `Market data is stale: ${this.state.marketData.error}` : 'Market data is stale.');
+    }
+    if (marketSync.consecutiveFailureCount > 0) {
+      warnings.push(`Market sync has ${marketSync.consecutiveFailureCount} consecutive failure${marketSync.consecutiveFailureCount === 1 ? '' : 's'}.`);
+    }
+    if (strategyEvaluation.lastError) {
+      warnings.push(`Strategy evaluation error: ${strategyEvaluation.lastError}`);
+    }
+    if (persistence.lastError) {
+      warnings.push(`Runtime state persistence error: ${persistence.lastError}`);
+    }
+    if (ledger.anomalyCount > 0) {
+      warnings.push(`Ledger projection reported ${ledger.anomalyCount} anomaly${ledger.anomalyCount === 1 ? '' : 'ies'}.`);
+    }
+
+    let status: RuntimeHealth['status'] = 'healthy';
+    if (this.state.marketData.stale || strategyEvaluation.lastError || persistence.lastError || ledger.anomalyCount > 0) {
+      status = 'degraded';
+    } else if (warnings.length > 0) {
+      status = 'warning';
+    }
+
+    const summary = status === 'healthy'
+      ? `Paper runtime healthy, ${this.state.markets.length} markets live, ${this.state.strategy.openPositionCount} open paper position${this.state.strategy.openPositionCount === 1 ? '' : 's'}.`
+      : warnings[0] ?? 'Operator attention is required.';
+
+    return {
+      safeToExpose: true,
+      generatedAt,
+      status,
+      mode: this.state.mode,
+      paused: this.state.paused,
+      uptimeMs: ageMs(this.state.startedAt) ?? 0,
+      heartbeatAgeMs: ageMs(this.state.lastHeartbeatAt) ?? 0,
+      summary,
+      warnings
+    };
   }
 }

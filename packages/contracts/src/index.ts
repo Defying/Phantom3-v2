@@ -65,6 +65,9 @@ export type RuntimeMarket = z.infer<typeof runtimeMarketSchema>;
 export const strategyRuntimeStatusSchema = z.enum(['idle', 'observing', 'paused', 'degraded']);
 export type StrategyRuntimeStatus = z.infer<typeof strategyRuntimeStatusSchema>;
 
+export const strategyStateTriggerSchema = z.enum(['bootstrap', 'market-refresh', 'market-refresh-error', 'pause', 'resume']);
+export type StrategyStateTrigger = z.infer<typeof strategyStateTriggerSchema>;
+
 export const strategyCandidateSchema = z.object({
   marketId: z.string(),
   slug: z.string(),
@@ -145,7 +148,7 @@ export type StrategyRuntimeSummary = z.infer<typeof strategyRuntimeSummarySchema
 export const strategyStateSnapshotSchema = z.object({
   id: z.string(),
   createdAt: z.string(),
-  trigger: z.enum(['bootstrap', 'market-refresh', 'market-refresh-error', 'pause', 'resume']),
+  trigger: strategyStateTriggerSchema,
   mode: runtimeModeSchema,
   status: strategyRuntimeStatusSchema,
   summary: z.string(),
@@ -157,6 +160,128 @@ export const strategyStateSnapshotSchema = z.object({
   notes: z.array(z.string())
 });
 export type StrategyStateSnapshot = z.infer<typeof strategyStateSnapshotSchema>;
+
+export const runtimeHealthStatusSchema = z.enum(['healthy', 'warning', 'degraded']);
+export type RuntimeHealthStatus = z.infer<typeof runtimeHealthStatusSchema>;
+
+export const diagnosticsCounterSchema = z.object({
+  attemptCount: z.number().int().nonnegative(),
+  successCount: z.number().int().nonnegative(),
+  failureCount: z.number().int().nonnegative()
+});
+export type DiagnosticsCounter = z.infer<typeof diagnosticsCounterSchema>;
+
+export const rejectReasonCountSchema = z.object({
+  reason: z.string(),
+  count: z.number().int().positive()
+});
+export type RejectReasonCount = z.infer<typeof rejectReasonCountSchema>;
+
+export const runtimeHealthSchema = z.object({
+  safeToExpose: z.literal(true),
+  generatedAt: z.string(),
+  status: runtimeHealthStatusSchema,
+  mode: runtimeModeSchema,
+  paused: z.boolean(),
+  uptimeMs: z.number().int().nonnegative(),
+  heartbeatAgeMs: z.number().int().nonnegative(),
+  summary: z.string(),
+  warnings: z.array(z.string())
+});
+export type RuntimeHealth = z.infer<typeof runtimeHealthSchema>;
+
+export const marketSyncDiagnosticsSchema = z.object({
+  safeToExpose: z.literal(true),
+  state: z.enum(['never', 'ok', 'error']),
+  stale: z.boolean(),
+  refreshInFlight: z.boolean(),
+  refreshIntervalMs: z.number().int().positive(),
+  lastAttemptAt: z.string().nullable(),
+  lastSuccessAt: z.string().nullable(),
+  lastFailureAt: z.string().nullable(),
+  lastDurationMs: z.number().int().nonnegative().nullable(),
+  lastSuccessDurationMs: z.number().int().nonnegative().nullable(),
+  lastFailureDurationMs: z.number().int().nonnegative().nullable(),
+  marketDataAgeMs: z.number().int().nonnegative().nullable(),
+  marketsInLatestSnapshot: z.number().int().nonnegative(),
+  counters: diagnosticsCounterSchema,
+  consecutiveFailureCount: z.number().int().nonnegative(),
+  error: z.string().nullable()
+});
+export type MarketSyncDiagnostics = z.infer<typeof marketSyncDiagnosticsSchema>;
+
+export const strategyEvaluationDiagnosticsSchema = z.object({
+  safeToExpose: z.literal(true),
+  engineId: z.string(),
+  strategyVersion: z.string(),
+  status: strategyRuntimeStatusSchema,
+  lastSnapshotTrigger: strategyStateTriggerSchema.nullable(),
+  lastEvaluationTrigger: strategyStateTriggerSchema.nullable(),
+  lastStartedAt: z.string().nullable(),
+  lastCompletedAt: z.string().nullable(),
+  lastSuccessAt: z.string().nullable(),
+  lastDurationMs: z.number().int().nonnegative().nullable(),
+  lastEvaluatedAt: z.string().nullable(),
+  lastError: z.string().nullable(),
+  counters: diagnosticsCounterSchema,
+  watchedMarketCount: z.number().int().nonnegative(),
+  candidateCount: z.number().int().nonnegative(),
+  eligibleMarketCount: z.number().int().nonnegative(),
+  rejectedMarketCount: z.number().int().nonnegative(),
+  emittedIntentCount: z.number().int().nonnegative(),
+  submittedIntentCount: z.number().int().nonnegative(),
+  openIntentCount: z.number().int().nonnegative(),
+  openPositionCount: z.number().int().nonnegative(),
+  openExposureUsd: z.number().nonnegative(),
+  riskDecisionCount: z.number().int().nonnegative(),
+  rejectReasonBreakdown: z.array(rejectReasonCountSchema),
+  notes: z.array(z.string())
+});
+export type StrategyEvaluationDiagnostics = z.infer<typeof strategyEvaluationDiagnosticsSchema>;
+
+export const persistenceDiagnosticsSchema = z.object({
+  safeToExpose: z.literal(true),
+  statePath: z.string(),
+  stateFileBytes: z.number().int().nonnegative(),
+  pendingWrite: z.boolean(),
+  lastScheduledAt: z.string().nullable(),
+  lastStartedAt: z.string().nullable(),
+  lastPersistedAt: z.string().nullable(),
+  lastDurationMs: z.number().int().nonnegative().nullable(),
+  counters: diagnosticsCounterSchema,
+  lastError: z.string().nullable()
+});
+export type PersistenceDiagnostics = z.infer<typeof persistenceDiagnosticsSchema>;
+
+export const ledgerDiagnosticsSchema = z.object({
+  safeToExpose: z.literal(true),
+  filePath: z.string(),
+  fileBytes: z.number().int().nonnegative(),
+  latestSequence: z.number().int().nonnegative(),
+  lastAppendedAt: z.string().nullable(),
+  intentCount: z.number().int().nonnegative(),
+  orderCount: z.number().int().nonnegative(),
+  openOrderCount: z.number().int().nonnegative(),
+  fillCount: z.number().int().nonnegative(),
+  positionCount: z.number().int().nonnegative(),
+  openPositionCount: z.number().int().nonnegative(),
+  positionEventCount: z.number().int().nonnegative(),
+  anomalyCount: z.number().int().nonnegative(),
+  anomalies: z.array(z.string())
+});
+export type LedgerDiagnostics = z.infer<typeof ledgerDiagnosticsSchema>;
+
+export const runtimeDiagnosticsSchema = z.object({
+  safeToExpose: z.literal(true),
+  generatedAt: z.string(),
+  runtime: runtimeHealthSchema,
+  marketSync: marketSyncDiagnosticsSchema,
+  strategyEvaluation: strategyEvaluationDiagnosticsSchema,
+  persistence: persistenceDiagnosticsSchema,
+  ledger: ledgerDiagnosticsSchema,
+  recentEvents: z.array(runtimeEventSchema)
+});
+export type RuntimeDiagnostics = z.infer<typeof runtimeDiagnosticsSchema>;
 
 export const paperStrategyViewSchema = z.object({
   mode: z.literal('paper'),

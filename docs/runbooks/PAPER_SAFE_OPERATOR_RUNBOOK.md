@@ -49,13 +49,18 @@ npm run start
 Then confirm:
 - `/api/health` returns healthy JSON
 - `/api/runtime` reports `mode: "paper"`
+- `/api/runtime/diagnostics` shows current market sync, strategy evaluation, persistence, and ledger status
+- `/api/runtime/events?limit=10` returns recent operator-visible events
 - the runtime shows the execution path as blocked or disarmed
 - unauthorized control requests fail with `401`
 
 ## During a supervised paper session
 
 The operator should keep an eye on:
-- stale market-data status
+- stale market-data status and consecutive sync failures from `/api/runtime/diagnostics`
+- the latest strategy evaluation trigger, duration, reject breakdown, and submission count
+- runtime persistence health, especially pending writes or persist failures
+- ledger anomaly count, open orders, and last append time
 - whether pause state is respected immediately
 - whether events and logs remain coherent
 - whether a restart would leave any paper state unexplained
@@ -70,6 +75,7 @@ Recommended discipline:
 
 Pause the runtime and treat the session as invalid if:
 - market data becomes stale and does not recover quickly
+- `/api/runtime/diagnostics` shows persistence failures, ledger anomalies, or repeated strategy evaluation errors
 - the runtime cannot explain a decision or state transition
 - unauthorized control access behaves unexpectedly
 - strategy output appears without a corresponding risk or ledger trail

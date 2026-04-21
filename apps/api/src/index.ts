@@ -69,6 +69,11 @@ async function main(): Promise<void> {
 
   app.get('/api/runtime', async () => store.getState());
   app.get('/api/runtime/strategy', async () => store.getStrategySummary());
+  app.get('/api/runtime/events', async (request) => ({
+    safeToExpose: true,
+    events: store.getRecentEvents(readLimit(request.query, 10, 40))
+  }));
+  app.get('/api/runtime/diagnostics', async (request) => store.getRuntimeDiagnostics(readLimit(request.query, 10, 20)));
 
   app.get('/api/paper/strategy', async (request, reply) => {
     const paperStrategy = store.getPaperStrategyView(readLimit(request.query, 6, 12));
@@ -98,9 +103,11 @@ async function main(): Promise<void> {
     transport: 'websocket',
     wsEndpoint: '/api/ws',
     strategySummaryEndpoint: '/api/runtime/strategy',
+    runtimeEventsEndpoint: '/api/runtime/events',
+    runtimeDiagnosticsEndpoint: '/api/runtime/diagnostics',
     paperStrategyEndpoint: '/api/paper/strategy',
     paperStrategySnapshotsEndpoint: '/api/paper/strategy/snapshots',
-    note: 'Read endpoints are open. Paper strategy routes are sanitized and read-only. Control routes require a token.'
+    note: 'Read endpoints are open. Diagnostics surfaces are sanitized and read-only. Control routes require a token.'
   }));
 
   app.get('/api/ws', { websocket: true }, (socket) => {
