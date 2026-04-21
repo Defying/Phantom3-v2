@@ -81,6 +81,18 @@ This gives Phantom3 v2 a strategy-core module that is:
 - safe to run in paper mode today
 - ready for a later risk engine to approve, resize, or reject
 
+## Runtime follow-through
+
+`apps/api/src/runtime-store.ts` now consumes these exit constraints for paper positions only.
+
+That runtime layer:
+- keeps the original entry-side exit constraints in paper intent metadata
+- derives a conservative position-level paper exit plan from open lots
+- exposes typed exit state on each open paper position
+- submits only reduce-only paper exits when take-profit, stop-loss, time, or invalidation conditions trigger
+
+This keeps the strategy engine itself read-only while still letting the paper runtime close positions truthfully and conservatively.
+
 ## Known limits
 
 This engine does not yet use:

@@ -124,10 +124,16 @@ export function createEntryIntentSummary(
     marketId: intent.marketId,
     marketQuestion: intent.question,
     side: intent.side,
+    kind: 'entry',
+    executionSide: 'buy',
+    reduceOnly: false,
     status,
     createdAt: options.createdAt ?? intent.generatedAt,
     thesis: intent.thesis.summary,
     desiredSizeUsd: round(desiredSizeUsd, 2),
+    positionId: null,
+    trigger: null,
+    limitPrice: intent.entry.acceptablePriceBand.max,
     maxEntryPrice: intent.entry.acceptablePriceBand.max
   };
 }
@@ -139,7 +145,9 @@ export function createExitIntentSummary(input: {
   side: 'yes' | 'no';
   createdAt: string;
   desiredSizeUsd: number;
-  maxEntryPrice: number | null;
+  positionId: string;
+  trigger: PaperIntentSummary['trigger'];
+  limitPrice: number | null;
   thesis: string;
 }): PaperIntentSummary {
   return {
@@ -147,24 +155,33 @@ export function createExitIntentSummary(input: {
     marketId: input.marketId,
     marketQuestion: input.marketQuestion,
     side: input.side,
+    kind: 'exit',
+    executionSide: 'sell',
+    reduceOnly: true,
     status: 'submitted',
     createdAt: input.createdAt,
     thesis: input.thesis,
     desiredSizeUsd: round(input.desiredSizeUsd, 2),
-    maxEntryPrice: input.maxEntryPrice
+    positionId: input.positionId,
+    trigger: input.trigger,
+    limitPrice: input.limitPrice,
+    maxEntryPrice: null
   };
 }
 
 export function createRiskDecisionSummary(
   decision: PaperRiskDecision,
   marketId: string,
-  question: string
+  question: string,
+  options: { kind?: RiskDecisionSummary['kind']; reduceOnly?: boolean } = {}
 ): RiskDecisionSummary {
   return {
     id: `${decision.intentId}:${decision.evaluatedAt}`,
     intentId: decision.intentId,
     marketId,
     question,
+    kind: options.kind ?? 'entry',
+    reduceOnly: options.reduceOnly ?? false,
     decision: decision.decision,
     approvedSizeUsd: round(decision.approvedSizeUsd, 2),
     createdAt: decision.evaluatedAt,
@@ -172,7 +189,11 @@ export function createRiskDecisionSummary(
   };
 }
 
-export function createPaperPositionSummary(position: ProjectedPosition, market: RuntimeMarket | null): PaperPositionSummary | null {
+export function createPaperPositionSummary(
+  position: ProjectedPosition,
+  market: RuntimeMarket | null,
+  options: { exit?: PaperPositionSummary['exit'] } = {}
+): PaperPositionSummary | null {
   if (position.status !== 'open' || position.netQuantity <= 0 || position.averageEntryPrice == null) {
     return null;
   }
@@ -194,7 +215,8 @@ export function createPaperPositionSummary(position: ProjectedPosition, market: 
     markPrice: markPrice == null ? null : round(markPrice),
     unrealizedPnlUsd,
     openedAt: position.openedAt ?? position.updatedAt ?? new Date().toISOString(),
-    status: 'open'
+    status: 'open',
+    exit: options.exit ?? null
   };
 }
 

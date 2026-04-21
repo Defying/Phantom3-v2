@@ -2,7 +2,9 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { AppConfig } from '../../../packages/config/src/index.js';
 import type {
+  PaperExitTrigger,
   PaperIntentSummary,
+  PaperPositionSummary,
   PaperStrategyView,
   RiskDecisionSummary,
   RuntimeEvent,
@@ -15,15 +17,16 @@ import type {
   WatchEntry
 } from '../../../packages/contracts/src/index.js';
 import { strategyRuntimeSummarySchema, strategyStateSnapshotSchema } from '../../../packages/contracts/src/index.js';
-import { getOpenOrders, JsonlLedger, positionKeyFor } from '../../../packages/ledger/src/index.js';
+import { getOpenOrders, JsonlLedger, positionKeyFor, type IntentApprovedEvent, type LedgerProjection, type ProjectedOrder, type ProjectedPosition } from '../../../packages/ledger/src/index.js';
 import { fetchTopMarkets, type MarketSnapshot } from '../../../packages/market-data/src/index.js';
 import { PaperExecutionAdapter, type ApprovedTradeIntent } from '../../../packages/paper-execution/src/index.js';
 import { createPaperRiskConfig, evaluatePaperTradeRisk, type PaperRiskDecision } from '../../../packages/risk/src/index.js';
-import { buildStrategySignalReport, type PaperTradeIntent } from '../../../packages/strategy/src/index.js';
+import { buildStrategySignalReport, type BinarySide, type PaperTradeIntent, type StrategyExitConstraints } from '../../../packages/strategy/src/index.js';
 import {
   MAX_STRATEGY_SNAPSHOTS,
   buildPaperStrategyView,
   createEntryIntentSummary,
+  createExitIntentSummary,
   createPaperPositionSummary,
   createPaperQuote,
   createRiskMarketSnapshot,
@@ -49,6 +52,64 @@ function event(level: RuntimeEvent['level'], message: string): RuntimeEvent {
 
 function clampSnapshotLimit(limit: number): number {
   return Math.min(Math.max(Math.trunc(limit), 1), MAX_STRATEGY_SNAPSHOTS);
+}
+
+function round(value: number, digits = 4): number {
+  const factor = 10 ** digits;
+  return Math.round(value * factor) / factor;
+}
+
+function formatProbability(value: number | null): string {
+  return value == null ? 'n/a' : round(value, 4).toFixed(4);
+}
+
+function formatExitTrigger(trigger: PaperExitTrigger): string {
+  switch (trigger) {
+    case 'take-profit-hit':
+      return 'take profit hit';
+    case 'stop-loss-hit':
+      return 'stop loss hit';
+    case 'latest-exit-reached':
+      return 'latest exit reached';
+    case 'spread-invalidated':
+      return 'spread invalidated the setup';
+    case 'complement-invalidated':
+      return 'complement drift invalidated the setup';
+    case 'expiry-window':
+      return 'expiry window reached';
+    default: {
+      const exhaustiveCheck: never = trigger;
+      return exhaustiveCheck;
+    }
+  }
+}
+
+function uniqueTriggers(triggers: PaperExitTrigger[]): PaperExitTrigger[] {
+  return [...new Set(triggers)];
+}
+
+function parseTimestamp(value: string | null | undefined): number | null {
+  if (value == null || value.trim().length === 0) {
+    return null;
+  }
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function hoursToExpiry(endDate: string | null, observedAt: string): number | null {
+  const endMs = parseTimestamp(endDate);
+  const observedAtMs = parseTimestamp(observedAt);
+  if (endMs == null || observedAtMs == null) {
+    return null;
+  }
+  return (endMs - observedAtMs) / 3_600_000;
+}
+
+function complementDrift(market: RuntimeMarket): number | null {
+  if (market.yesPrice == null || market.noPrice == null) {
+    return null;
+  }
+  return Math.abs(1 - (market.yesPrice + market.noPrice));
 }
 
 function strategyModuleStatus(strategy: StrategyRuntimeSummary): RuntimeModule['status'] {
@@ -368,9 +429,231 @@ export class RuntimeStore {
     this.state.watchlist = buildWatchlist(this.state);
   }
 
-  private summarizePositions(markets: RuntimeMarket[]): PaperIntentSummary[] {
-    void markets;
-    return [];
+  private inferSideFromToken(market: RuntimeMarket | null, tokenId: string | null | undefined, fallback: BinarySide = 'yes'): BinarySide {
+    if (market?.noTokenId && tokenId && tokenId === market.noTokenId) {
+      return 'no';
+    }
+    if (market?.yesTokenId && tokenId && tokenId === market.yesTokenId) {
+      return 'yes';
+    }
+    return fallback;
+  }
+
+  private summarizePositions(
+    projection: Awaited<ReturnType<JsonlLedger['readProjection']>>,
+    marketMap: Map<string, RuntimeMarket>,
+    observedAt: string
+  ): Map<string, NonNullable<PaperPositionSummary['exit']>> {
+    const exits = new Map<string, NonNullable<PaperPositionSummary['exit']>>();
+    for (const position of projection.positions.values()) {
+      if (position.status !== 'open' || position.netQuantity <= 0) {
+        continue;
+      }
+      const exit = this.buildPositionExitState({
+        projection,
+        position,
+        market: marketMap.get(position.marketId) ?? null,
+        observedAt
+      });
+      if (exit) {
+        exits.set(position.positionId, exit);
+      }
+    }
+    return exits;
+  }
+
+  private parseEntryIntentMetadata(intent: IntentApprovedEvent): {
+    strategyId: string;
+    question: string;
+    side: BinarySide;
+    exit: StrategyExitConstraints;
+  } | null {
+    const metadata = intent.metadata;
+    if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
+      return null;
+    }
+
+    const record = metadata as Record<string, unknown>;
+    const exit = record.exit;
+    if (record.kind !== 'entry' || typeof record.question !== 'string' || (record.side !== 'yes' && record.side !== 'no')) {
+      return null;
+    }
+    if (!exit || typeof exit !== 'object' || Array.isArray(exit)) {
+      return null;
+    }
+
+    const parsedExit = exit as Record<string, unknown>;
+    if (
+      typeof parsedExit.takeProfitPrice !== 'number' || !Number.isFinite(parsedExit.takeProfitPrice) ||
+      typeof parsedExit.stopLossPrice !== 'number' || !Number.isFinite(parsedExit.stopLossPrice) ||
+      typeof parsedExit.latestExitAt !== 'string' ||
+      typeof parsedExit.invalidateIfSpreadAbove !== 'number' || !Number.isFinite(parsedExit.invalidateIfSpreadAbove) ||
+      typeof parsedExit.invalidateIfComplementDriftAbove !== 'number' || !Number.isFinite(parsedExit.invalidateIfComplementDriftAbove) ||
+      typeof parsedExit.invalidateIfHoursToExpiryBelow !== 'number' || !Number.isFinite(parsedExit.invalidateIfHoursToExpiryBelow)
+    ) {
+      return null;
+    }
+
+    return {
+      strategyId: intent.strategyId,
+      question: record.question,
+      side: record.side,
+      exit: {
+        takeProfitPrice: parsedExit.takeProfitPrice,
+        stopLossPrice: parsedExit.stopLossPrice,
+        latestExitAt: parsedExit.latestExitAt,
+        invalidateIfSpreadAbove: parsedExit.invalidateIfSpreadAbove,
+        invalidateIfComplementDriftAbove: parsedExit.invalidateIfComplementDriftAbove,
+        invalidateIfHoursToExpiryBelow: parsedExit.invalidateIfHoursToExpiryBelow
+      }
+    };
+  }
+
+  private resolvePositionExitPlan(
+    projection: LedgerProjection,
+    position: ProjectedPosition,
+    market: RuntimeMarket | null
+  ): {
+    strategyId: string;
+    question: string;
+    side: BinarySide;
+    exit: StrategyExitConstraints;
+  } | null {
+    const fillsById = new Map(projection.fills.map((fill) => [fill.fillId, fill] as const));
+    const plans = position.lots.flatMap((lot) => {
+      const fill = fillsById.get(lot.sourceFillId);
+      if (!fill) {
+        return [];
+      }
+      const intent = projection.intents.get(fill.intentId);
+      if (!intent) {
+        return [];
+      }
+      const metadata = this.parseEntryIntentMetadata(intent);
+      return metadata ? [metadata] : [];
+    });
+
+    if (plans.length === 0) {
+      return null;
+    }
+
+    const latestExitAtMs = Math.min(...plans.map((plan) => parseTimestamp(plan.exit.latestExitAt) ?? Number.POSITIVE_INFINITY));
+    if (!Number.isFinite(latestExitAtMs)) {
+      return null;
+    }
+
+    return {
+      strategyId: plans[0].strategyId,
+      question: plans[0].question,
+      side: this.inferSideFromToken(market, position.tokenId, plans[0].side),
+      exit: {
+        takeProfitPrice: Math.min(...plans.map((plan) => plan.exit.takeProfitPrice)),
+        stopLossPrice: Math.max(...plans.map((plan) => plan.exit.stopLossPrice)),
+        latestExitAt: new Date(latestExitAtMs).toISOString(),
+        invalidateIfSpreadAbove: Math.min(...plans.map((plan) => plan.exit.invalidateIfSpreadAbove)),
+        invalidateIfComplementDriftAbove: Math.min(...plans.map((plan) => plan.exit.invalidateIfComplementDriftAbove)),
+        invalidateIfHoursToExpiryBelow: Math.max(...plans.map((plan) => plan.exit.invalidateIfHoursToExpiryBelow))
+      }
+    };
+  }
+
+  private evaluateExitTriggers(
+    market: RuntimeMarket | null,
+    side: BinarySide,
+    exit: StrategyExitConstraints,
+    observedAt: string
+  ): PaperExitTrigger[] {
+    const triggers: PaperExitTrigger[] = [];
+    const markPrice = market == null ? null : side === 'yes' ? market.yesPrice : market.noPrice;
+    const observedAtMs = parseTimestamp(observedAt);
+    const latestExitAtMs = parseTimestamp(exit.latestExitAt);
+    const spread = market?.spread ?? null;
+    const drift = market == null ? null : complementDrift(market);
+    const remainingHours = market == null ? null : hoursToExpiry(market.endDate, observedAt);
+
+    if (markPrice != null && markPrice <= exit.stopLossPrice) {
+      triggers.push('stop-loss-hit');
+    }
+    if (observedAtMs != null && latestExitAtMs != null && observedAtMs >= latestExitAtMs) {
+      triggers.push('latest-exit-reached');
+    }
+    if (spread != null && spread > exit.invalidateIfSpreadAbove) {
+      triggers.push('spread-invalidated');
+    }
+    if (drift != null && drift > exit.invalidateIfComplementDriftAbove) {
+      triggers.push('complement-invalidated');
+    }
+    if (remainingHours != null && remainingHours < exit.invalidateIfHoursToExpiryBelow) {
+      triggers.push('expiry-window');
+    }
+    if (markPrice != null && markPrice >= exit.takeProfitPrice) {
+      triggers.push('take-profit-hit');
+    }
+
+    return uniqueTriggers(triggers);
+  }
+
+  private findOpenSellOrder(
+    projection: Awaited<ReturnType<JsonlLedger['readProjection']>>,
+    marketId: string,
+    tokenId: string
+  ): ProjectedOrder | null {
+    return getOpenOrders(projection, { marketId, tokenId }).find((order) => order.side === 'sell') ?? null;
+  }
+
+  private buildPositionExitState(input: {
+    projection: LedgerProjection;
+    position: ProjectedPosition;
+    market: RuntimeMarket | null;
+    observedAt: string;
+  }): NonNullable<PaperPositionSummary['exit']> | null {
+    const exitPlan = this.resolvePositionExitPlan(input.projection, input.position, input.market);
+    if (!exitPlan) {
+      return null;
+    }
+
+    const openSellOrder = this.findOpenSellOrder(input.projection, input.position.marketId, input.position.tokenId);
+    const triggers = this.evaluateExitTriggers(input.market, exitPlan.side, exitPlan.exit, input.observedAt);
+    const quote = input.market ? createPaperQuote(input.market, exitPlan.side, input.observedAt) : null;
+    const recommendedLimitPrice = openSellOrder?.limitPrice ?? (triggers.length > 0 ? quote?.bestBid ?? null : null);
+    const referencePrice = recommendedLimitPrice
+      ?? (input.market == null ? null : exitPlan.side === 'yes' ? input.market.yesPrice : input.market.noPrice)
+      ?? input.position.averageEntryPrice
+      ?? 0;
+    const recommendedQuantity = round(
+      Math.max(0, openSellOrder?.remainingQuantity ?? (triggers.length > 0 ? input.position.netQuantity : 0)),
+      6
+    );
+    const recommendedSizeUsd = round(Math.max(0, recommendedQuantity * referencePrice), 2);
+    const status: NonNullable<PaperPositionSummary['exit']>['status'] = openSellOrder
+      ? 'submitted'
+      : triggers.length > 0
+        ? 'triggered'
+        : 'armed';
+
+    let summary = `Paper exit armed at TP ${formatProbability(exitPlan.exit.takeProfitPrice)}, stop ${formatProbability(exitPlan.exit.stopLossPrice)}, latest exit ${exitPlan.exit.latestExitAt}.`;
+    if (openSellOrder) {
+      summary = `Reduce-only exit order is working at ${formatProbability(openSellOrder.limitPrice)} for ${round(openSellOrder.remainingQuantity, 6)} contracts.`;
+    } else if (triggers.length > 0) {
+      summary = `Reduce-only exit recommended because ${triggers.map(formatExitTrigger).join(', ')}.`;
+    }
+
+    return {
+      status,
+      triggers,
+      evaluatedAt: input.observedAt,
+      summary,
+      takeProfitPrice: round(exitPlan.exit.takeProfitPrice),
+      stopLossPrice: round(exitPlan.exit.stopLossPrice),
+      latestExitAt: exitPlan.exit.latestExitAt,
+      invalidateIfSpreadAbove: round(exitPlan.exit.invalidateIfSpreadAbove),
+      invalidateIfComplementDriftAbove: round(exitPlan.exit.invalidateIfComplementDriftAbove),
+      invalidateIfHoursToExpiryBelow: round(exitPlan.exit.invalidateIfHoursToExpiryBelow, 2),
+      recommendedQuantity,
+      recommendedSizeUsd,
+      recommendedLimitPrice: recommendedLimitPrice == null ? null : round(recommendedLimitPrice),
+      submittedIntentId: openSellOrder?.intentId ?? null
+    };
   }
 
   private marketMap(markets = this.state.markets): Map<string, RuntimeMarket> {
@@ -409,12 +692,30 @@ export class RuntimeStore {
     return !this.recentIntentExists(projection, marketId, tokenId, now);
   }
 
-  private buildRiskDecisionSummary(decision: PaperRiskDecision, intent: PaperTradeIntent): RiskDecisionSummary {
+  private shouldSubmitExit(
+    projection: Awaited<ReturnType<JsonlLedger['readProjection']>>,
+    marketId: string,
+    tokenId: string
+  ): boolean {
+    return this.findOpenSellOrder(projection, marketId, tokenId) == null;
+  }
+
+  private buildRiskDecisionSummary(
+    decision: PaperRiskDecision,
+    input: {
+      marketId: string;
+      question: string;
+      kind?: RiskDecisionSummary['kind'];
+      reduceOnly?: boolean;
+    }
+  ): RiskDecisionSummary {
     return {
       id: `risk-${decision.intentId}`,
       intentId: decision.intentId,
-      marketId: intent.marketId,
-      question: intent.question,
+      marketId: input.marketId,
+      question: input.question,
+      kind: input.kind ?? 'entry',
+      reduceOnly: input.reduceOnly ?? false,
       decision: decision.decision,
       approvedSizeUsd: Math.round(decision.approvedSizeUsd * 100) / 100,
       createdAt: decision.evaluatedAt,
@@ -424,10 +725,11 @@ export class RuntimeStore {
 
   private projectionPositionsToSummaries(
     projection: Awaited<ReturnType<JsonlLedger['readProjection']>>,
-    marketMap: Map<string, RuntimeMarket>
+    marketMap: Map<string, RuntimeMarket>,
+    exits: Map<string, NonNullable<PaperPositionSummary['exit']>> = new Map()
   ) {
     return [...projection.positions.values()]
-      .map((position) => createPaperPositionSummary(position, marketMap.get(position.marketId) ?? null))
+      .map((position) => createPaperPositionSummary(position, marketMap.get(position.marketId) ?? null, { exit: exits.get(position.positionId) ?? null }))
       .filter((position): position is NonNullable<typeof position> => Boolean(position));
   }
 
@@ -517,19 +819,211 @@ export class RuntimeStore {
     };
   }
 
+  private createRuntimeExitIntentId(positionId: string, observedAt: string): string {
+    return `exit-${positionId}-${observedAt}`.replace(/[^a-z0-9]+/gi, '-').toLowerCase();
+  }
+
+  private createApprovedExitIntent(input: {
+    strategyId: string;
+    position: ProjectedPosition;
+    question: string;
+    side: BinarySide;
+    trigger: PaperExitTrigger | null;
+    triggers: PaperExitTrigger[];
+    approvedSizeUsd: number;
+    limitPrice: number;
+    observedAt: string;
+  }): ApprovedTradeIntent | null {
+    const quantity = Math.min(input.position.netQuantity, input.approvedSizeUsd / input.limitPrice);
+    if (!Number.isFinite(quantity) || quantity <= 0) {
+      return null;
+    }
+
+    const thesis = `Paper-only reduce-only exit for "${input.question}" because ${input.triggers.length > 0 ? input.triggers.map(formatExitTrigger).join(', ') : 'the paper exit plan triggered'}.`;
+
+    return {
+      sessionId: 'phantom3-v2-paper-runtime',
+      intentId: this.createRuntimeExitIntentId(input.position.positionId, input.observedAt),
+      strategyId: input.strategyId,
+      marketId: input.position.marketId,
+      tokenId: input.position.tokenId,
+      side: 'sell',
+      limitPrice: input.limitPrice,
+      quantity: Math.round(quantity * 1_000_000) / 1_000_000,
+      approvedAt: input.observedAt,
+      thesis,
+      metadata: {
+        kind: 'exit',
+        question: input.question,
+        generatedAt: input.observedAt,
+        reduceOnly: true,
+        positionId: input.position.positionId,
+        trigger: input.trigger,
+        triggers: input.triggers,
+        desiredSizeUsd: input.approvedSizeUsd,
+        side: input.side
+      }
+    };
+  }
+
+  private async reconcileOpenOrders(
+    projection: Awaited<ReturnType<JsonlLedger['readProjection']>>,
+    marketMap: Map<string, RuntimeMarket>,
+    observedAt: string
+  ): Promise<boolean> {
+    let changed = false;
+    const seen = new Set<string>();
+
+    for (const order of getOpenOrders(projection)) {
+      const key = positionKeyFor(order.marketId, order.tokenId);
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+
+      const market = marketMap.get(order.marketId);
+      if (!market) {
+        continue;
+      }
+
+      const quote = createPaperQuote(market, this.inferSideFromToken(market, order.tokenId), observedAt);
+      if (!quote) {
+        continue;
+      }
+
+      const result = await this.paperExecution.reconcileQuote(quote);
+      if (result.envelopes.length > 0) {
+        changed = true;
+      }
+    }
+
+    return changed;
+  }
+
   private async evaluateStrategy(trigger: StrategyStateSnapshot['trigger'], snapshot: MarketSnapshot): Promise<void> {
     const report = buildStrategySignalReport(snapshot);
     const marketMap = this.marketMap(snapshot.markets);
+    const riskConfig = createPaperRiskConfig({
+      maxPositionSizeUsd: 40,
+      perMarketExposureCapUsd: 50,
+      totalExposureCapUsd: 125,
+      maxSimultaneousPositions: 3,
+      maxSpreadBps: 600
+    });
+
     let projection = await this.ledger.readProjection();
+    if (await this.reconcileOpenOrders(projection, marketMap, snapshot.fetchedAt)) {
+      projection = await this.ledger.readProjection();
+    }
+
     let positions = this.projectionPositionsToSummaries(projection, marketMap);
     let riskPositions = positions.map(createRiskPositionSnapshot);
 
     const riskDecisions: RiskDecisionSummary[] = [];
     const intentSummaries: PaperIntentSummary[] = [];
     const previousIntents = new Map(
-      this.currentStrategyPayload().intents.map((summary) => [`${summary.marketId}:${summary.side}`, summary] as const)
+      this.currentStrategyPayload().intents
+        .filter((summary) => summary.kind === 'entry')
+        .map((summary) => [`${summary.kind}:${summary.marketId}:${summary.side}`, summary] as const)
     );
-    let submittedCount = 0;
+    let submittedEntryCount = 0;
+    let submittedExitCount = 0;
+
+    for (const position of projection.positions.values()) {
+      if (position.status !== 'open' || position.netQuantity <= 0) {
+        continue;
+      }
+
+      const market = marketMap.get(position.marketId) ?? null;
+      const exitPlan = this.resolvePositionExitPlan(projection, position, market);
+      const exitState = this.buildPositionExitState({
+        projection,
+        position,
+        market,
+        observedAt: snapshot.fetchedAt
+      });
+
+      if (!exitPlan || !exitState || exitState.status === 'armed' || !market) {
+        continue;
+      }
+      if (!this.shouldSubmitExit(projection, position.marketId, position.tokenId)) {
+        continue;
+      }
+
+      const quote = createPaperQuote(market, exitPlan.side, snapshot.fetchedAt);
+      const riskMarket = createRiskMarketSnapshot(market, exitPlan.side, snapshot.fetchedAt);
+      const referencePrice = quote?.bestBid
+        ?? (exitPlan.side === 'yes' ? market.yesPrice : market.noPrice)
+        ?? position.averageEntryPrice
+        ?? 0;
+      const desiredSizeUsd = round(Math.max(0, position.netQuantity * referencePrice), 2);
+      if (desiredSizeUsd <= 0) {
+        continue;
+      }
+
+      const riskDecision = evaluatePaperTradeRisk({
+        intent: {
+          intentId: this.createRuntimeExitIntentId(position.positionId, snapshot.fetchedAt),
+          strategyVersion: report.engine.strategyVersion,
+          marketId: position.marketId,
+          tokenId: position.tokenId,
+          side: exitPlan.side,
+          desiredSizeUsd,
+          maxEntryPrice: null,
+          reduceOnly: true
+        },
+        market: riskMarket,
+        positions: riskPositions,
+        config: riskConfig,
+        now: snapshot.fetchedAt
+      });
+
+      riskDecisions.push(this.buildRiskDecisionSummary(riskDecision, {
+        marketId: position.marketId,
+        question: exitPlan.question,
+        kind: 'exit',
+        reduceOnly: true
+      }));
+
+      if (!quote || quote.bestBid == null || (riskDecision.decision !== 'approve' && riskDecision.decision !== 'resize')) {
+        continue;
+      }
+
+      const approvedIntent = this.createApprovedExitIntent({
+        strategyId: exitPlan.strategyId,
+        position,
+        question: exitPlan.question,
+        side: exitPlan.side,
+        trigger: exitState.triggers[0] ?? null,
+        triggers: exitState.triggers,
+        approvedSizeUsd: riskDecision.approvedSizeUsd,
+        limitPrice: quote.bestBid,
+        observedAt: snapshot.fetchedAt
+      });
+
+      if (!approvedIntent) {
+        continue;
+      }
+
+      await this.paperExecution.submitApprovedIntent({ intent: approvedIntent, quote });
+      intentSummaries.push(createExitIntentSummary({
+        id: approvedIntent.intentId,
+        marketId: approvedIntent.marketId,
+        marketQuestion: exitPlan.question,
+        side: exitPlan.side,
+        createdAt: approvedIntent.approvedAt ?? snapshot.fetchedAt,
+        desiredSizeUsd: round(approvedIntent.quantity * approvedIntent.limitPrice, 2),
+        positionId: position.positionId,
+        trigger: exitState.triggers[0] ?? null,
+        limitPrice: approvedIntent.limitPrice,
+        thesis: approvedIntent.thesis ?? `Paper-only reduce-only exit for "${exitPlan.question}".`
+      }));
+      submittedExitCount += 1;
+
+      projection = await this.ledger.readProjection();
+      positions = this.projectionPositionsToSummaries(projection, marketMap);
+      riskPositions = positions.map(createRiskPositionSnapshot);
+    }
 
     for (const intent of report.intents) {
       const market = marketMap.get(intent.marketId);
@@ -553,19 +1047,18 @@ export class RuntimeStore {
         },
         market: riskMarket,
         positions: riskPositions,
-        config: createPaperRiskConfig({
-          maxPositionSizeUsd: 40,
-          perMarketExposureCapUsd: 50,
-          totalExposureCapUsd: 125,
-          maxSimultaneousPositions: 3,
-          maxSpreadBps: 600
-        }),
+        config: riskConfig,
         now: snapshot.fetchedAt
       });
 
-      riskDecisions.push(this.buildRiskDecisionSummary(draftDecision, intent));
+      riskDecisions.push(this.buildRiskDecisionSummary(draftDecision, {
+        marketId: intent.marketId,
+        question: intent.question,
+        kind: 'entry',
+        reduceOnly: false
+      }));
 
-      const previousSummary = previousIntents.get(`${intent.marketId}:${intent.side}`) ?? null;
+      const previousSummary = previousIntents.get(`entry:${intent.marketId}:${intent.side}`) ?? null;
       let status: PaperIntentSummary['status'] = draftDecision.decision === 'approve' || draftDecision.decision === 'resize'
         ? 'watching'
         : 'draft';
@@ -589,7 +1082,7 @@ export class RuntimeStore {
           status = 'submitted';
           summaryId = approvedIntent.intentId;
           summaryCreatedAt = approvedIntent.approvedAt;
-          submittedCount += 1;
+          submittedEntryCount += 1;
         }
       }
 
@@ -606,12 +1099,27 @@ export class RuntimeStore {
       );
     }
 
+    const positionExits = this.summarizePositions(projection, marketMap, snapshot.fetchedAt);
+    positions = this.projectionPositionsToSummaries(projection, marketMap, positionExits);
+    const armedExitCount = positions.filter((position) => position.exit?.status === 'armed').length;
+    const triggeredExitCount = positions.filter((position) => position.exit?.status === 'triggered').length;
+    const workingExitCount = positions.filter((position) => position.exit?.status === 'submitted').length;
+
     const notes = [
       'Append-only paper ledger is active for paper intents, orders, fills, and positions.',
-      submittedCount > 0
-        ? `Submitted ${submittedCount} new paper entry intent${submittedCount === 1 ? '' : 's'} on the latest evaluation.`
+      submittedEntryCount > 0
+        ? `Submitted ${submittedEntryCount} new paper entry intent${submittedEntryCount === 1 ? '' : 's'} on the latest evaluation.`
         : 'No new paper entries were submitted on the latest evaluation.',
-      'Auto exits are not wired yet, so open paper positions stay open until a later milestone.'
+      submittedExitCount > 0
+        ? `Submitted ${submittedExitCount} reduce-only paper exit intent${submittedExitCount === 1 ? '' : 's'} on the latest evaluation.`
+        : triggeredExitCount > 0
+          ? `Flagged ${triggeredExitCount} open paper position${triggeredExitCount === 1 ? '' : 's'} for reduce-only exit review.`
+          : armedExitCount > 0
+            ? `Tracked ${armedExitCount} armed paper exit plan${armedExitCount === 1 ? '' : 's'} across open positions.`
+            : 'No paper exits are armed because no paper positions are open.',
+      workingExitCount > 0
+        ? `There ${workingExitCount === 1 ? 'is' : 'are'} ${workingExitCount} reduce-only paper exit order${workingExitCount === 1 ? '' : 's'} still working in the ledger.`
+        : 'Open positions now expose typed paper exit state, and the runtime only submits reduce-only paper exits.'
     ];
 
     this.syncStrategyState(trigger, {
