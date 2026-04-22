@@ -56,7 +56,9 @@ function makeQuote(overrides: Partial<PaperQuote> = {}): PaperQuote {
     tokenId: TOKEN_ID,
     observedAt: FIXED_NOW,
     bestBid: 0.39,
+    bidSize: 10,
     bestAsk: 0.4,
+    askSize: 10,
     midpoint: 0.395,
     source: 'test-quote',
     ...overrides
@@ -89,6 +91,44 @@ test('midpoint-only quotes never create a fill or position', async () => {
   assert.equal(projection.fills.length, 0);
   assert.equal(getOpenOrders(projection).length, 1);
   assert.equal(projection.positions.get(positionKey), undefined);
+});
+
+test('quotes without executable size never synthesize fillable depth', async () => {
+  const { adapter, ledger, positionKey } = await createHarness();
+
+  const entry = await adapter.submitApprovedIntent({
+    intent: makeIntent({ intentId: 'buy-missing-ask-depth', side: 'buy', limitPrice: 0.8, quantity: 4 }),
+    quote: makeQuote({ quoteId: 'quote-missing-ask-depth', askSize: undefined })
+  });
+
+  assert.equal(entry.status, 'open');
+  assert.equal(entry.fillEvent, undefined);
+
+  let projection = await ledger.readProjection();
+  assert.equal(projection.positions.get(positionKey), undefined);
+  assert.deepEqual(getOpenOrders(projection).map((order) => order.orderId), [entry.orderId]);
+
+  await adapter.reconcileQuote(
+    makeQuote({ quoteId: 'quote-entry-depth-arrives', askSize: 4 })
+  );
+
+  projection = await ledger.readProjection();
+  assert.equal(projection.positions.get(positionKey)?.netQuantity, 4);
+
+  const exit = await adapter.submitApprovedIntent({
+    intent: makeIntent({ intentId: 'sell-missing-bid-depth', side: 'sell', limitPrice: 0.5, quantity: 4 })
+  });
+  assert.equal(exit.status, 'open');
+
+  const noBidDepth = await adapter.reconcileQuote(
+    makeQuote({ quoteId: 'quote-missing-bid-depth', bestBid: 0.51, bestAsk: 0.52, midpoint: 0.515, bidSize: undefined })
+  );
+
+  assert.deepEqual(noBidDepth.filledOrderIds, []);
+
+  projection = await ledger.readProjection();
+  assert.equal(projection.positions.get(positionKey)?.netQuantity, 4);
+  assert.equal(projection.orders.get(exit.orderId)?.status, 'open');
 });
 
 test('unmatched exits stay open until a real bid fills them, and realized P&L uses that fill price only', async () => {

@@ -119,7 +119,9 @@ async function main(): Promise<void> {
         tokenId: market.yesTokenId ?? 'token-yes',
         observedAt: now.toISOString(),
         bestBid: 0.39,
+        bidSize: 10,
         bestAsk: 0.4,
+        askSize: 10,
         midpoint: 0.395,
         source: 'paper-runtime-smoke'
       }
@@ -146,7 +148,9 @@ async function main(): Promise<void> {
         tokenId: market.yesTokenId ?? 'token-yes',
         observedAt: now.toISOString(),
         bestBid: 0.55,
+        bidSize: 4,
         bestAsk: 0.56,
+        askSize: 4,
         midpoint: 0.555,
         source: 'paper-runtime-smoke'
       }

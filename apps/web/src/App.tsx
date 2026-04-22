@@ -6,8 +6,17 @@ import type {
   RuntimeState,
   StrategyCandidate
 } from '../../../packages/contracts/src/index';
+import {
+  buildControlHeaders,
+  deriveDashboardFreshness,
+  liveControlBadge,
+  moduleBadge,
+  watchEntryBadge,
+  type DashboardFreshness
+} from './dashboard-helpers';
 
 const tokenStorageKey = 'phantom3-v2-control-token';
+const tokenCookieKey = 'phantom3-v2-control-token';
 
 const compactUsdFormatter = new Intl.NumberFormat('en-US', {
   style: 'currency',
@@ -23,17 +32,23 @@ const usdFormatter = new Intl.NumberFormat('en-US', {
 const compactNumber = new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 1 });
 const integerFormatter = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 });
 
-type SocketState = 'connecting' | 'live' | 'reconnecting' | 'offline';
+type SocketState = 'connecting' | 'live' | 'reconnecting' | 'offline' | 'stale';
 type Tone = 'healthy' | 'warning' | 'idle' | 'blocked' | 'info' | 'long' | 'short';
 type TradingPreferenceOption = RuntimeState['tradingPreference']['selected'];
 type StrategyRouting = NonNullable<RuntimeState['strategy']['routing']>;
 
 type RuntimeEnvelope = { type: 'runtime'; data: RuntimeState } | { type: 'pong'; at: string };
 
-async function fetchRuntime(): Promise<RuntimeState> {
-  const response = await fetch('/api/runtime');
+async function fetchRuntime(token: string): Promise<RuntimeState> {
+  const response = await fetch('/api/runtime', {
+    headers: buildControlHeaders(token)
+  });
   if (!response.ok) {
-    throw new Error('Failed to fetch runtime');
+    if (response.status === 401) {
+      throw new Error('Control token required to load runtime data.');
+    }
+    const payload = await response.json().catch(() => ({} as { error?: string }));
+    throw new Error(payload.error || 'Failed to fetch runtime');
   }
   return response.json();
 }
@@ -41,6 +56,50 @@ async function fetchRuntime(): Promise<RuntimeState> {
 function websocketUrl(): string {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   return `${protocol}//${window.location.host}/api/ws`;
+}
+
+function readSessionToken(): string {
+  if (typeof window === 'undefined') return '';
+  try {
+    return window.sessionStorage.getItem(tokenStorageKey) ?? '';
+  } catch {
+    return '';
+  }
+}
+
+function writeSessionToken(token: string): void {
+  if (typeof window === 'undefined') return;
+  try {
+    if (token) {
+      window.sessionStorage.setItem(tokenStorageKey, token);
+    } else {
+      window.sessionStorage.removeItem(tokenStorageKey);
+    }
+  } catch {
+    // Ignore browser storage failures and keep the in-memory copy.
+  }
+}
+
+function clearLegacyTokenStorage(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.removeItem(tokenStorageKey);
+  } catch {
+    // Ignore browser storage failures.
+  }
+}
+
+function syncTokenCookie(token: string): void {
+  if (typeof document === 'undefined') return;
+  const secure = window.location.protocol === 'https:' ? '; Secure' : '';
+  const trimmed = token.trim();
+
+  if (trimmed.length === 0) {
+    document.cookie = `${tokenCookieKey}=; Path=/; Max-Age=0; SameSite=Strict${secure}`;
+    return;
+  }
+
+  document.cookie = `${tokenCookieKey}=${encodeURIComponent(trimmed)}; Path=/; SameSite=Strict${secure}`;
 }
 
 function formatPercent(value: number | null | undefined, digits = 1): string {
@@ -156,9 +215,12 @@ function SocketDot({ state }: { state: SocketState }) {
       ? 'Connecting'
       : state === 'reconnecting'
       ? 'Reconnecting'
+      : state === 'stale'
+      ? 'Stale'
       : 'Offline';
+  const title = state === 'stale' ? 'WebSocket: connected, but runtime updates are stale' : `WebSocket: ${label}`;
   return (
-    <span className={`socket-dot socket-${state}`} title={`WebSocket: ${label}`}>
+    <span className={`socket-dot socket-${state}`} title={title}>
       <span className="socket-pip" aria-hidden />
       <span className="socket-label">{label}</span>
     </span>
@@ -167,10 +229,12 @@ function SocketDot({ state }: { state: SocketState }) {
 
 function StatusBar({
   runtime,
-  socketState
+  socketState,
+  freshness
 }: {
   runtime: RuntimeState | null;
   socketState: SocketState;
+  freshness: DashboardFreshness;
 }) {
   const paused = runtime?.paused ?? false;
   const stale = runtime?.marketData.stale ?? false;
@@ -193,6 +257,7 @@ function StatusBar({
         <span className="chip chip-mode">{mode.toUpperCase()}</span>
         <span className={`chip chip-${runTone}`}>{runLabel}</span>
         <span className={`chip chip-${stale ? 'warning' : 'long'}`}>{stale ? 'Stale data' : 'Market live'}</span>
+        {freshness.stale ? <span className="chip chip-warning">Dashboard stale</span> : null}
         <SocketDot state={socketState} />
       </div>
     </header>
@@ -651,7 +716,9 @@ function ControlsPanel({
   sendControl,
   saveTradingPreference,
   runtime,
-  socketState
+  socketState,
+  freshness,
+  lastRuntimeMessageAt
 }: {
   token: string;
   setToken: (value: string) => void;
@@ -661,11 +728,15 @@ function ControlsPanel({
   saveTradingPreference: (profile: TradingPreferenceOption['profile']) => Promise<void> | void;
   runtime: RuntimeState | null;
   socketState: SocketState;
+  freshness: DashboardFreshness;
+  lastRuntimeMessageAt: number | null;
 }) {
   const tradingPreference = runtime?.tradingPreference;
   const selectedPreference = tradingPreference?.selected ?? null;
   const availablePreferences = tradingPreference?.available ?? [];
   const routing = runtime?.strategy.routing ?? null;
+  const liveControl = liveControlBadge(runtime);
+  const lastConfirmedUpdate = lastRuntimeMessageAt ? new Date(lastRuntimeMessageAt).toISOString() : runtime?.lastHeartbeatAt ?? null;
 
   return (
     <section className="panel panel-controls" aria-label="Controls and access">
@@ -688,6 +759,10 @@ function ControlsPanel({
           autoComplete="off"
         />
       </label>
+      <p className="subtle small">Saved only for this browser tab. Closing the tab clears it.</p>
+      {freshness.stale ? (
+        <p className="subtle small">Updates are stale. Use controls cautiously until the stream resumes.</p>
+      ) : null}
       <div className="button-row">
         <button
           className="btn btn-warning"
@@ -789,8 +864,10 @@ function ControlsPanel({
       <div className="access-kv">
         <div><span>Public URL</span><strong>{runtime?.publicBaseUrl ?? '—'}</strong></div>
         <div><span>Transport</span><strong>WebSocket · {socketState}</strong></div>
+        <div><span>Live control</span><strong className={`pill pill-${liveControl.tone} pill-ghost`}>{liveControl.label}</strong></div>
         <div><span>Entry policy</span><strong>{routing ? (routing.entryPolicy === 'emit-new-entries' ? 'emit new paper entries' : 'manage open positions only') : '—'}</strong></div>
         <div><span>Evaluator</span><strong>{routing?.evaluatedLabel ?? '—'}</strong></div>
+        <div><span>Last update</span><strong className="num">{formatRelative(lastConfirmedUpdate)}</strong></div>
         <div><span>Heartbeat</span><strong className="num">{runtime?.lastHeartbeatAt ? new Date(runtime.lastHeartbeatAt).toLocaleTimeString() : '—'}</strong></div>
       </div>
     </section>
@@ -853,33 +930,39 @@ function ModulesAndWatchlist({ runtime }: { runtime: RuntimeState | null }) {
         <div>
           <p className="mini-eyebrow">Modules</p>
           <ul className="module-mini-list">
-            {runtime?.modules.map((module) => (
-              <li key={module.id} className={`module-mini module-${module.status}`}>
-                <span className={`chip-xs chip-${module.status === 'healthy' ? 'long' : module.status === 'warning' ? 'warning' : module.status === 'blocked' ? 'short' : 'idle'}-ghost`}>
-                  {module.status}
-                </span>
-                <div>
-                  <strong>{module.name}</strong>
-                  <p className="subtle small">{module.summary}</p>
-                </div>
-              </li>
-            ))}
+            {runtime?.modules.map((module) => {
+              const badge = moduleBadge(module, runtime);
+              return (
+                <li key={module.id} className={`module-mini module-${module.status}`}>
+                  <span className={`chip-xs chip-${badge.tone}-ghost`}>
+                    {badge.label}
+                  </span>
+                  <div>
+                    <strong>{module.name}</strong>
+                    <p className="subtle small">{module.summary}</p>
+                  </div>
+                </li>
+              );
+            })}
           </ul>
         </div>
         <div>
           <p className="mini-eyebrow">Watchlist</p>
           <ul className="module-mini-list">
-            {runtime?.watchlist.map((entry) => (
-              <li key={entry.id} className="module-mini">
-                <span className={`chip-xs chip-${entry.status === 'active' ? 'long' : entry.status === 'planned' ? 'warning' : 'idle'}-ghost`}>
-                  {entry.status}
-                </span>
-                <div>
-                  <strong>{entry.label}</strong>
-                  <p className="subtle small">{entry.note}</p>
-                </div>
-              </li>
-            ))}
+            {runtime?.watchlist.map((entry) => {
+              const badge = watchEntryBadge(entry, runtime);
+              return (
+                <li key={entry.id} className="module-mini">
+                  <span className={`chip-xs chip-${badge.tone}-ghost`}>
+                    {badge.label}
+                  </span>
+                  <div>
+                    <strong>{entry.label}</strong>
+                    <p className="subtle small">{entry.note}</p>
+                  </div>
+                </li>
+              );
+            })}
           </ul>
         </div>
       </div>
@@ -893,29 +976,31 @@ export function App() {
   const [runtime, setRuntime] = useState<RuntimeState | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [token, setToken] = useState(() => localStorage.getItem(tokenStorageKey) ?? '');
+  const [token, setToken] = useState(() => readSessionToken());
   const [busy, setBusy] = useState(false);
   const [socketState, setSocketState] = useState<SocketState>('connecting');
+  const [lastRuntimeMessageAt, setLastRuntimeMessageAt] = useState<number | null>(null);
+  const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
     let cancelled = false;
     let socket: WebSocket | null = null;
     let reconnectTimer: number | null = null;
 
-    const loadFallback = async () => {
-      try {
-        const next = await fetchRuntime();
-        if (!cancelled) {
-          setRuntime(next);
-          setLoading(false);
-        }
-      } catch (err) {
-        if (!cancelled) {
-          setError(err instanceof Error ? err.message : 'Unknown error');
-          setLoading(false);
-        }
-      }
-    };
+    clearLegacyTokenStorage();
+    const sessionToken = token.trim();
+    syncTokenCookie(sessionToken);
+
+    if (!sessionToken) {
+      setRuntime(null);
+      setLastRuntimeMessageAt(null);
+      setLoading(false);
+      setSocketState('offline');
+      setError('Enter the control token to unlock runtime data and controls.');
+      return () => undefined;
+    }
+
+    setLoading(true);
 
     const connect = () => {
       setSocketState((current) => (current === 'live' ? 'reconnecting' : 'connecting'));
@@ -933,6 +1018,7 @@ export function App() {
           const message = JSON.parse(event.data) as RuntimeEnvelope;
           if (message.type === 'runtime') {
             setRuntime(message.data);
+            setLastRuntimeMessageAt(Date.now());
             setLoading(false);
             setError(null);
           }
@@ -952,19 +1038,43 @@ export function App() {
       });
     };
 
-    void loadFallback();
-    connect();
+    const loadAndConnect = async () => {
+      try {
+        const next = await fetchRuntime(sessionToken);
+        if (cancelled) return;
+        setRuntime(next);
+        setLastRuntimeMessageAt(Date.now());
+        setLoading(false);
+        setError(null);
+        connect();
+      } catch (err) {
+        if (!cancelled) {
+          setRuntime(null);
+          setLastRuntimeMessageAt(null);
+          setSocketState('offline');
+          setError(err instanceof Error ? err.message : 'Unknown error');
+          setLoading(false);
+        }
+      }
+    };
+
+    void loadAndConnect();
 
     return () => {
       cancelled = true;
       if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
       socket?.close();
     };
-  }, []);
+  }, [token]);
 
   useEffect(() => {
-    localStorage.setItem(tokenStorageKey, token);
+    writeSessionToken(token);
   }, [token]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   const { positions, intents, riskDecisions } = useMemo(() => {
     const strategy = runtime?.strategy;
@@ -975,8 +1085,19 @@ export function App() {
     };
   }, [runtime]);
 
+  const dashboardFreshness = useMemo(
+    () => deriveDashboardFreshness({
+      now,
+      lastRuntimeMessageAt,
+      lastHeartbeatAt: runtime?.lastHeartbeatAt ?? null
+    }),
+    [lastRuntimeMessageAt, now, runtime?.lastHeartbeatAt]
+  );
+  const effectiveSocketState: SocketState = socketState === 'live' && dashboardFreshness.stale ? 'stale' : socketState;
+
   const sendControl = async (path: '/api/control/pause' | '/api/control/resume') => {
-    if (!token) {
+    const sessionToken = token.trim();
+    if (!sessionToken) {
       setError('Control token required for write actions.');
       return;
     }
@@ -984,14 +1105,15 @@ export function App() {
     try {
       const response = await fetch(path, {
         method: 'POST',
-        headers: { 'x-phantom3-token': token }
+        headers: buildControlHeaders(sessionToken)
       });
       if (!response.ok) {
         const payload = await response.json().catch(() => ({} as { error?: string }));
         throw new Error(payload.error || 'Control action failed');
       }
-      const next = await fetchRuntime();
+      const next = await fetchRuntime(sessionToken);
       setRuntime(next);
+      setLastRuntimeMessageAt(Date.now());
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Control action failed');
@@ -1001,7 +1123,8 @@ export function App() {
   };
 
   const saveTradingPreference = async (profile: TradingPreferenceOption['profile']) => {
-    if (!token) {
+    const sessionToken = token.trim();
+    if (!sessionToken) {
       setError('Control token required for write actions.');
       return;
     }
@@ -1011,7 +1134,7 @@ export function App() {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
-          'x-phantom3-token': token
+          ...buildControlHeaders(sessionToken)
         },
         body: JSON.stringify({ profile })
       });
@@ -1019,8 +1142,9 @@ export function App() {
         const payload = await response.json().catch(() => ({} as { error?: string }));
         throw new Error(payload.error || 'Trading preference update failed');
       }
-      const next = await fetchRuntime();
+      const next = await fetchRuntime(sessionToken);
       setRuntime(next);
+      setLastRuntimeMessageAt(Date.now());
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Trading preference update failed');
@@ -1029,14 +1153,24 @@ export function App() {
     }
   };
 
+  const lastConfirmedUpdate = lastRuntimeMessageAt ? new Date(lastRuntimeMessageAt).toISOString() : runtime?.lastHeartbeatAt ?? null;
+
   return (
     <div className="app-shell">
-      <StatusBar runtime={runtime} socketState={socketState} />
+      <StatusBar runtime={runtime} socketState={effectiveSocketState} freshness={dashboardFreshness} />
       <main className="app-main">
         {error ? (
           <div className="error-banner" role="alert">
             <strong>⚠ {error}</strong>
             <button type="button" className="link-button" onClick={() => setError(null)}>dismiss</button>
+          </div>
+        ) : null}
+        {dashboardFreshness.stale ? (
+          <div className="warning-banner" role="status">
+            <strong>{dashboardFreshness.reason === 'heartbeat' ? 'Runtime heartbeat stalled.' : 'Dashboard updates stalled.'}</strong>
+            <span>
+              Last confirmed update {formatRelative(lastConfirmedUpdate)}. Treat prices, badges, and controls as potentially outdated until the stream recovers.
+            </span>
           </div>
         ) : null}
 
@@ -1059,7 +1193,9 @@ export function App() {
             sendControl={sendControl}
             saveTradingPreference={saveTradingPreference}
             runtime={runtime}
-            socketState={socketState}
+            socketState={effectiveSocketState}
+            freshness={dashboardFreshness}
+            lastRuntimeMessageAt={lastRuntimeMessageAt}
           />
         </div>
 

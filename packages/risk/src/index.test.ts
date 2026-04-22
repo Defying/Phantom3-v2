@@ -107,3 +107,30 @@ test('spread checks derive from the executable book rather than the midpoint ref
   assert.equal(decision.decision, 'approve');
   assert.equal(decision.metrics.spreadBps, 400);
 });
+
+test('reduce-only approvals do not clip profitable exits when exposure snapshots stay on cost basis', () => {
+  const decision = evaluatePaperTradeRisk({
+    intent: makeIntent({
+      intentId: 'intent-exit-profitable',
+      reduceOnly: true,
+      desiredSizeUsd: 22,
+      maxEntryPrice: null
+    }),
+    market: makeMarket({
+      bestBid: 0.55,
+      bestAsk: 0.57,
+      midpoint: 0.56
+    }),
+    positions: [makePosition({ exposureUsd: 20, quantity: 40, markPrice: 0.9 })],
+    config: {
+      minLiquidityUsd: 0,
+      minVolume24hrUsd: 0,
+      maxSpreadBps: 10_000
+    },
+    now: FIXED_NOW
+  });
+
+  assert.equal(decision.decision, 'approve');
+  assert.equal(decision.approvedSizeUsd, 22);
+  assert.equal(decision.metrics.currentSameSideExposureUsd, 20);
+});

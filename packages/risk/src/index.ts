@@ -149,6 +149,10 @@ export function evaluatePaperTradeRisk(input: PaperRiskEvaluationInput): PaperRi
     positions,
     (position) => position.marketId === parsed.intent.marketId && position.side === parsed.intent.side
   );
+  const currentSameSideQuantity = sumQuantity(
+    positions,
+    (position) => position.marketId === parsed.intent.marketId && position.side === parsed.intent.side
+  );
   const currentMarketExposureUsd = sumExposureUsd(
     positions,
     (position) => position.marketId === parsed.intent.marketId
@@ -158,6 +162,12 @@ export function evaluatePaperTradeRisk(input: PaperRiskEvaluationInput): PaperRi
   const remainingMarketCapacityUsd = Math.max(0, config.perMarketExposureCapUsd - currentMarketExposureUsd);
   const remainingTotalCapacityUsd = Math.max(0, config.totalExposureCapUsd - currentTotalExposureUsd);
   const referenceEntryPrice = resolveExecutableReferencePrice(parsed.market, parsed.intent.reduceOnly);
+  const currentSameSideReducibleSizeUsd = sumReducibleSizeUsd(
+    positions,
+    (position) => position.marketId === parsed.intent.marketId && position.side === parsed.intent.side,
+    referenceEntryPrice
+  );
+  const hasSameSidePosition = currentSameSideQuantity > EPSILON || currentSameSideExposureUsd > EPSILON;
   const spreadBps = computeSpreadBps(parsed.market);
   const marketFreshnessMs = computeEffectiveFreshnessMs(parsed.market, nowMs);
   const liquiditySizeLimitUsd =
@@ -204,6 +214,7 @@ export function evaluatePaperTradeRisk(input: PaperRiskEvaluationInput): PaperRi
     marketFreshnessMs,
     currentMarketExposureUsd,
     currentSameSideExposureUsd,
+    hasSameSidePosition,
     openMarketCount
   });
   if (hardRejectReasons.length > 0) {
@@ -218,7 +229,7 @@ export function evaluatePaperTradeRisk(input: PaperRiskEvaluationInput): PaperRi
   }
 
   if (parsed.intent.reduceOnly) {
-    const approvedSizeUsd = roundUsd(Math.min(parsed.intent.desiredSizeUsd, currentSameSideExposureUsd));
+    const approvedSizeUsd = roundUsd(Math.min(parsed.intent.desiredSizeUsd, currentSameSideReducibleSizeUsd));
     if (approvedSizeUsd <= EPSILON) {
       return finalizeDecision({
         decision: 'reject',
@@ -242,10 +253,10 @@ export function evaluatePaperTradeRisk(input: PaperRiskEvaluationInput): PaperRi
         approvedSizeUsd,
         intentId: parsed.intent.intentId,
         reasons: [
-          buildReason('reduce_only_resized_to_open_exposure', 'Reduce-only size was clipped to the currently open same-side exposure.', {
+          buildReason('reduce_only_resized_to_open_exposure', 'Reduce-only size was clipped to the currently open same-side position.', {
             requestedSizeUsd: roundUsd(parsed.intent.desiredSizeUsd),
             approvedSizeUsd,
-            currentSameSideExposureUsd: roundUsd(currentSameSideExposureUsd)
+            currentSameSideReducibleSizeUsd: roundUsd(currentSameSideReducibleSizeUsd)
           })
         ],
         metrics: baseMetrics,
@@ -434,6 +445,7 @@ function getHardRejectReasons(options: {
   marketFreshnessMs: number | null;
   currentMarketExposureUsd: number;
   currentSameSideExposureUsd: number;
+  hasSameSidePosition: boolean;
   openMarketCount: number;
 }): RiskReason[] {
   const {
@@ -445,6 +457,7 @@ function getHardRejectReasons(options: {
     marketFreshnessMs,
     currentMarketExposureUsd,
     currentSameSideExposureUsd,
+    hasSameSidePosition,
     openMarketCount
   } = options;
 
@@ -555,7 +568,7 @@ function getHardRejectReasons(options: {
         })
       );
     }
-  } else if (currentSameSideExposureUsd <= EPSILON) {
+  } else if (!hasSameSidePosition) {
     reasons.push(
       buildReason('no_position_to_reduce', 'Reduce-only intent has no same-side paper exposure to unwind.', {
         marketId: intent.marketId,
@@ -594,6 +607,33 @@ function sumExposureUsd(
   predicate: (position: PositionSnapshot) => boolean = () => true
 ): number {
   return positions.reduce((total, position) => (predicate(position) ? total + position.exposureUsd : total), 0);
+}
+
+function sumQuantity(
+  positions: PositionSnapshot[],
+  predicate: (position: PositionSnapshot) => boolean = () => true
+): number {
+  return positions.reduce((total, position) => (predicate(position) ? total + (position.quantity ?? 0) : total), 0);
+}
+
+function sumReducibleSizeUsd(
+  positions: PositionSnapshot[],
+  predicate: (position: PositionSnapshot) => boolean,
+  executablePrice: number | null
+): number {
+  if (executablePrice == null || executablePrice <= EPSILON) {
+    return 0;
+  }
+
+  return positions.reduce((total, position) => {
+    if (!predicate(position)) {
+      return total;
+    }
+    if (position.quantity != null) {
+      return total + position.quantity * executablePrice;
+    }
+    return total + position.exposureUsd;
+  }, 0);
 }
 
 function countOpenMarkets(positions: PositionSnapshot[]): number {

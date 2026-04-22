@@ -16,6 +16,13 @@ import type { AppConfig } from '../packages/config/src/index.js'
 
 const checks: Array<{ ok: boolean; label: string; detail: string }> = []
 
+function authHeaders(token: string): Record<string, string> {
+  return {
+    authorization: `Bearer ${token}`,
+    'x-phantom3-token': token
+  }
+}
+
 function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
@@ -116,7 +123,11 @@ async function main(): Promise<void> {
       assert.equal(pauseResponse.statusCode, 200)
       assert.deepEqual(pauseResponse.json(), { ok: true, paused: true })
 
-      const pausedState = runtimeStateSchema.parse((await activePrimary.app.inject({ method: 'GET', url: '/api/runtime' })).json())
+      const pausedState = runtimeStateSchema.parse((await activePrimary.app.inject({
+        method: 'GET',
+        url: '/api/runtime',
+        headers: authHeaders(activePrimary.config.controlToken)
+      })).json())
       assert.equal(pausedState.mode, 'paper')
       assert.equal(pausedState.paused, true)
       assert.equal(pausedState.strategy.status, 'paused')
@@ -131,7 +142,11 @@ async function main(): Promise<void> {
       assert.equal(resumeResponse.statusCode, 200)
       assert.deepEqual(resumeResponse.json(), { ok: true, paused: false })
 
-      const resumedState = runtimeStateSchema.parse((await activePrimary.app.inject({ method: 'GET', url: '/api/runtime' })).json())
+      const resumedState = runtimeStateSchema.parse((await activePrimary.app.inject({
+        method: 'GET',
+        url: '/api/runtime',
+        headers: authHeaders(activePrimary.config.controlToken)
+      })).json())
       assert.equal(resumedState.mode, 'paper')
       assert.equal(resumedState.paused, false)
       assert.equal(resumedState.strategy.status, 'idle')
@@ -183,7 +198,11 @@ async function main(): Promise<void> {
       assert.equal(access.tradingPreferenceControlEndpoint, '/api/control/trading-preference')
       assert.match(access.note, /legacy profiles stay reference-only/i)
 
-      const runtimeState = runtimeStateSchema.parse((await activePrimary.app.inject({ method: 'GET', url: '/api/runtime' })).json())
+      const runtimeState = runtimeStateSchema.parse((await activePrimary.app.inject({
+        method: 'GET',
+        url: '/api/runtime',
+        headers: authHeaders(activePrimary.config.controlToken)
+      })).json())
       assert.equal(runtimeState.mode, 'paper')
       assert.equal(runtimeState.tradingPreference.selected.profile, 'legacy-early-exit-live')
       assert.equal(runtimeState.tradingPreference.selected.parityStatus, 'legacy-reference')
@@ -212,7 +231,11 @@ async function main(): Promise<void> {
     const activeRestart = restart
 
     await expect('restart rehydrates the selected profile and bearer auth can switch back to the current runtime profile', async () => {
-      const rehydratedState = runtimeStateSchema.parse((await activeRestart.app.inject({ method: 'GET', url: '/api/runtime' })).json())
+      const rehydratedState = runtimeStateSchema.parse((await activeRestart.app.inject({
+        method: 'GET',
+        url: '/api/runtime',
+        headers: authHeaders(activeRestart.config.controlToken)
+      })).json())
       assert.equal(rehydratedState.tradingPreference.selected.profile, 'legacy-early-exit-live')
       assert.equal(rehydratedState.tradingPreference.selected.parityStatus, 'legacy-reference')
       assert.equal(rehydratedState.mode, 'paper')

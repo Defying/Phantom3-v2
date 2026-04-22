@@ -8,7 +8,9 @@ import type { ProjectedPosition } from '../../../packages/ledger/src/index.js';
 import {
   createPaperPositionSummary,
   createPaperQuote,
-  createRiskMarketSnapshot
+  createRiskMarketSnapshot,
+  createRiskPositionSnapshot,
+  createStrategyRuntimeSummary
 } from './strategy-runtime.js';
 
 const FIXED_NOW = '2026-04-21T16:00:00.000Z';
@@ -81,4 +83,45 @@ test('position summaries label midpoint-derived mark prices with their source', 
   assert(summary);
   assert.equal(summary.markPrice, 0.61);
   assert.equal(summary.markPriceSource, RUNTIME_MIDPOINT_REFERENCE_PRICE_SOURCE);
+});
+
+test('risk position snapshots keep exposure on cost basis even when midpoint marks drift', () => {
+  const summary = createPaperPositionSummary(makePosition({ netQuantity: 5, averageEntryPrice: 0.5 }), makeMarket({ yesPrice: 0.61 }));
+
+  assert(summary);
+  const snapshot = createRiskPositionSnapshot(summary);
+  assert.equal(snapshot.exposureUsd, 2.5);
+  assert.equal(snapshot.markPrice, 0.61);
+});
+
+test('strategy runtime exposure stays on capital at risk instead of midpoint marks', () => {
+  const summary = createPaperPositionSummary(makePosition({ netQuantity: 5, averageEntryPrice: 0.5 }), makeMarket({ yesPrice: 0.61 }));
+
+  assert(summary);
+  const runtime = createStrategyRuntimeSummary(
+    {
+      mode: 'paper',
+      paused: false,
+      marketData: {
+        stale: false,
+        syncedAt: FIXED_NOW
+      },
+      markets: [makeMarket()],
+      tradingPreference: {
+        selected: {
+          profile: 'current-v2-generic'
+        }
+      }
+    } as Parameters<typeof createStrategyRuntimeSummary>[0],
+    [],
+    {
+      report: null,
+      intents: [],
+      riskDecisions: [],
+      positions: [summary],
+      lastEvaluatedAt: FIXED_NOW
+    }
+  );
+
+  assert.equal(runtime.openExposureUsd, 2.5);
 });

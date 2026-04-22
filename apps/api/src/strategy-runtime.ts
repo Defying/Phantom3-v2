@@ -43,6 +43,10 @@ function round(value: number, digits = 4): number {
   return Math.round(value * factor) / factor;
 }
 
+function positionCapitalAtRiskUsd(position: Pick<PaperPositionSummary, 'quantity' | 'averageEntryPrice'>): number {
+  return Math.max(0, round(position.quantity * position.averageEntryPrice, 2));
+}
+
 function compactUsd(value: number): string {
   if (value >= 1_000_000) {
     return `$${round(value / 1_000_000, 2)}m`;
@@ -252,7 +256,7 @@ export function createRiskPositionSnapshot(summary: PaperPositionSummary): Posit
   return {
     marketId: summary.marketId,
     side: summary.side,
-    exposureUsd: Math.max(0, round(summary.quantity * (summary.markPrice ?? summary.averageEntryPrice), 2)),
+    exposureUsd: positionCapitalAtRiskUsd(summary),
     quantity: summary.quantity,
     markPrice: summary.markPrice,
     openedAt: summary.openedAt
@@ -374,10 +378,7 @@ export function createStrategyRuntimeSummary(
 ): StrategyRuntimeSummary {
   const latestSnapshot = snapshots[0] ?? null;
   const candidates = payload.report ? selectCandidates(payload.report) : latestSnapshot?.candidates ?? [];
-  const openExposureUsd = payload.positions.reduce(
-    (sum, position) => sum + position.quantity * (position.markPrice ?? position.averageEntryPrice),
-    0
-  );
+  const openExposureUsd = payload.positions.reduce((sum, position) => sum + positionCapitalAtRiskUsd(position), 0);
   const routing = buildRoutingSummary(state);
 
   return {

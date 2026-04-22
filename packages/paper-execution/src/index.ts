@@ -538,7 +538,7 @@ export class PaperExecutionAdapter {
   }
 
   private normalizeLiquidity(size: number | undefined): number {
-    return size == null ? Number.POSITIVE_INFINITY : Math.max(0, size);
+    return size == null ? 0 : Math.max(0, size);
   }
 
   private makeId(prefix: string): string {
