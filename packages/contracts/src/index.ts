@@ -120,6 +120,67 @@ export const paperPositionSummarySchema = z.object({
 });
 export type PaperPositionSummary = z.infer<typeof paperPositionSummarySchema>;
 
+export const requestedRuntimeModeSchema = z.enum(['paper', 'live']);
+export type RequestedRuntimeMode = z.infer<typeof requestedRuntimeModeSchema>;
+
+export const runtimeTradeStatusSchema = z.enum(['pending', 'reconcile', 'open', 'closed', 'error']);
+export type RuntimeTradeStatus = z.infer<typeof runtimeTradeStatusSchema>;
+
+export const runtimeTradeStateCountsSchema = z.object({
+  pending: z.number().int().nonnegative(),
+  reconcile: z.number().int().nonnegative(),
+  open: z.number().int().nonnegative(),
+  closed: z.number().int().nonnegative(),
+  error: z.number().int().nonnegative()
+});
+export type RuntimeTradeStateCounts = z.infer<typeof runtimeTradeStateCountsSchema>;
+
+export const runtimeTradeSummarySchema = z.object({
+  id: z.string(),
+  marketId: z.string(),
+  tokenId: z.string(),
+  marketQuestion: z.string(),
+  side: z.enum(['yes', 'no']),
+  status: runtimeTradeStatusSchema,
+  note: z.string(),
+  orderCount: z.number().int().nonnegative(),
+  openOrderCount: z.number().int().nonnegative(),
+  filledQuantity: z.number().nonnegative(),
+  remainingQuantity: z.number().nonnegative(),
+  positionQuantity: z.number().nonnegative(),
+  averageEntryPrice: z.number().min(0).max(1).nullable(),
+  markPrice: z.number().min(0).max(1).nullable(),
+  realizedPnlUsd: z.number().nullable(),
+  unrealizedPnlUsd: z.number().nullable(),
+  openedAt: z.string().nullable(),
+  closedAt: z.string().nullable(),
+  lastUpdatedAt: z.string()
+});
+export type RuntimeTradeSummary = z.infer<typeof runtimeTradeSummarySchema>;
+
+export const runtimeLiveControlSchema = z.object({
+  configured: z.boolean(),
+  armable: z.boolean(),
+  armed: z.boolean(),
+  liveAdapterReady: z.boolean(),
+  killSwitchActive: z.boolean(),
+  killSwitchReason: z.string().nullable(),
+  flattenSupported: z.boolean(),
+  lastOperatorAction: z.string().nullable(),
+  lastOperatorActionAt: z.string().nullable(),
+  summary: z.string()
+});
+export type RuntimeLiveControl = z.infer<typeof runtimeLiveControlSchema>;
+
+export const runtimeExecutionSummarySchema = z.object({
+  requestedMode: requestedRuntimeModeSchema,
+  summary: z.string(),
+  tradeStates: runtimeTradeStateCountsSchema,
+  trades: z.array(runtimeTradeSummarySchema),
+  live: runtimeLiveControlSchema
+});
+export type RuntimeExecutionSummary = z.infer<typeof runtimeExecutionSummarySchema>;
+
 export const strategyRuntimeSummarySchema = z.object({
   engineId: z.string(),
   strategyVersion: z.string(),
@@ -179,6 +240,7 @@ export const runtimeStateSchema = z.object({
   marketData: runtimeMarketDataSchema,
   markets: z.array(runtimeMarketSchema),
   strategy: strategyRuntimeSummarySchema,
+  execution: runtimeExecutionSummarySchema,
   modules: z.array(runtimeModuleSchema),
   watchlist: z.array(watchEntrySchema),
   events: z.array(runtimeEventSchema)

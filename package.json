@@ -9,6 +9,8 @@
     "check": "tsc --noEmit -p tsconfig.json",
     "dev": "tsx watch apps/api/src/index.ts",
     "start": "tsx apps/api/src/index.ts",
+    "test:live-safety": "node --import tsx --test packages/paper-execution/src/live-safety.regression.test.ts",
+    "verify:live-safety": "npm run check && npm run test:live-safety",
     "verify:paper-safe": "node scripts/verify-paper-safe.mjs"
   },
   "dependencies": {

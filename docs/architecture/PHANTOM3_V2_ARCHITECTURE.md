@@ -449,6 +449,7 @@ Success condition:
 - real order submit/ack/fill reconciliation
 - no fancy strategy changes yet
 - operator flatten + kill switch required
+- concrete planned spec: `docs/architecture/MILESTONE_3_LIVE_TRADING_THIN_SLICE.md`
 
 Success condition:
 - one live trade can be traced perfectly from intent to fill to final position state

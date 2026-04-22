@@ -12,7 +12,17 @@ export type ExecutionMode = z.infer<typeof executionModeSchema>;
 export const tradeSideSchema = z.enum(['buy', 'sell']);
 export type TradeSide = z.infer<typeof tradeSideSchema>;
 
-export const orderStatusSchema = z.enum(['open', 'partially-filled', 'filled', 'rejected']);
+export const orderStatusSchema = z.enum([
+  'pending-submit',
+  'pending-ack',
+  'open',
+  'partially-filled',
+  'filled',
+  'cancel-pending',
+  'canceled',
+  'rejected',
+  'reconcile'
+]);
 export type OrderStatus = z.infer<typeof orderStatusSchema>;
 
 export const liquidityRoleSchema = z.enum(['maker', 'taker']);
@@ -30,6 +40,7 @@ export const approvedTradeIntentSchema = z.object({
   side: tradeSideSchema,
   limitPrice: probabilityPriceSchema,
   quantity: quantitySchema,
+  reduceOnly: z.boolean().optional(),
   approvedAt: z.string().min(1).optional(),
   thesis: z.string().min(1).optional(),
   confidence: z.number().min(0).max(1).nullable().optional(),
@@ -68,6 +79,7 @@ export const intentApprovedEventSchema = eventBaseSchema.extend({
   side: tradeSideSchema,
   limitPrice: probabilityPriceSchema,
   quantity: quantitySchema,
+  reduceOnly: z.boolean().optional(),
   thesis: z.string().min(1).optional(),
   confidence: z.number().min(0).max(1).nullable().optional(),
   metadata: metadataSchema.optional()
@@ -85,9 +97,15 @@ export const orderUpdatedEventSchema = eventBaseSchema.extend({
   remainingQuantity: nonNegativeNumberSchema,
   status: orderStatusSchema,
   rejectionReason: z.string().min(1).nullable().optional(),
+  venueOrderId: z.string().min(1).nullable().optional(),
+  venueStatus: z.string().min(1).nullable().optional(),
+  acknowledgedAt: z.string().min(1).nullable().optional(),
+  lastReconciledAt: z.string().min(1).nullable().optional(),
+  statusReason: z.string().min(1).nullable().optional(),
   quoteId: z.string().min(1).nullable().optional(),
   referenceBid: probabilityPriceSchema.nullable().optional(),
-  referenceAsk: probabilityPriceSchema.nullable().optional()
+  referenceAsk: probabilityPriceSchema.nullable().optional(),
+  metadata: metadataSchema.optional()
 });
 export type OrderUpdatedEvent = z.infer<typeof orderUpdatedEventSchema>;
 
@@ -102,9 +120,12 @@ export const fillRecordedEventSchema = eventBaseSchema.extend({
   fee: nonNegativeNumberSchema,
   notional: nonNegativeNumberSchema,
   liquidityRole: liquidityRoleSchema,
+  venueFillId: z.string().min(1).nullable().optional(),
+  exchangeTimestamp: z.string().min(1).nullable().optional(),
   quoteId: z.string().min(1).nullable().optional(),
   referenceBid: probabilityPriceSchema.nullable().optional(),
-  referenceAsk: probabilityPriceSchema.nullable().optional()
+  referenceAsk: probabilityPriceSchema.nullable().optional(),
+  metadata: metadataSchema.optional()
 });
 export type FillRecordedEvent = z.infer<typeof fillRecordedEventSchema>;
 
@@ -123,11 +144,31 @@ export const positionUpdatedEventSchema = eventBaseSchema.extend({
 });
 export type PositionUpdatedEvent = z.infer<typeof positionUpdatedEventSchema>;
 
+export const operatorActionSchema = z.enum(['flatten-requested', 'kill-switch-engaged', 'kill-switch-released']);
+export type OperatorAction = z.infer<typeof operatorActionSchema>;
+
+export const operatorActionEventSchema = z.object({
+  kind: z.literal('operator.action'),
+  eventId: z.string().min(1),
+  recordedAt: z.string().min(1),
+  sessionId: z.string().min(1),
+  executionMode: executionModeSchema,
+  marketId: z.string().min(1).nullable().optional(),
+  tokenId: z.string().min(1).nullable().optional(),
+  action: operatorActionSchema,
+  targetOrderId: z.string().min(1).nullable().optional(),
+  targetPositionId: z.string().min(1).nullable().optional(),
+  note: z.string().min(1).nullable().optional(),
+  metadata: metadataSchema.optional()
+});
+export type OperatorActionEvent = z.infer<typeof operatorActionEventSchema>;
+
 export const paperLedgerEventSchema = z.union([
   intentApprovedEventSchema,
   orderUpdatedEventSchema,
   fillRecordedEventSchema,
-  positionUpdatedEventSchema
+  positionUpdatedEventSchema,
+  operatorActionEventSchema
 ]);
 export type PaperLedgerEvent = z.infer<typeof paperLedgerEventSchema>;
 

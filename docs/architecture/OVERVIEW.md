@@ -29,3 +29,8 @@ Use these docs together:
 - `docs/milestones/PAPER_SAFE_STRATEGY_MILESTONE.md`
 - `docs/qa/PAPER_SAFE_STRATEGY_CHECKLIST.md`
 - `docs/runbooks/PAPER_SAFE_OPERATOR_RUNBOOK.md`
+
+## Planned live-trading design reference
+
+The first live-capital spec is documented separately and remains **planned, not implemented**:
+- `docs/architecture/MILESTONE_3_LIVE_TRADING_THIN_SLICE.md`

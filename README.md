@@ -67,6 +67,7 @@ Notes:
 - milestone definition: `docs/milestones/PAPER_SAFE_STRATEGY_MILESTONE.md`
 - QA checklist: `docs/qa/PAPER_SAFE_STRATEGY_CHECKLIST.md`
 - operator runbook and warnings: `docs/runbooks/PAPER_SAFE_OPERATOR_RUNBOOK.md`
+- future live thin-slice review checklist: `docs/qa/LIVE_THIN_SLICE_REVIEW_CHECKLIST.md`
 
 ## Important safety notes
 
@@ -77,6 +78,7 @@ Notes:
 - change `PHANTOM3_V2_CONTROL_TOKEN` before any shared use
 - do **not** expose this app to the public internet, keep it on localhost, LAN, or a trusted private tunnel
 - live mode is not implemented in this bootstrap
+- before any live thin-slice PR is treated as ready for review, run `npm run verify:live-safety`
 - a passing `npm run verify:paper-safe` only confirms static guardrails and docs markers, not trading safety or readiness
 
 ## Repo layout

@@ -69,6 +69,7 @@ async function main(): Promise<void> {
 
   app.get('/api/runtime', async () => store.getState());
   app.get('/api/runtime/strategy', async () => store.getStrategySummary());
+  app.get('/api/runtime/execution', async () => store.getState().execution);
 
   app.get('/api/paper/strategy', async (request, reply) => {
     const paperStrategy = store.getPaperStrategyView(readLimit(request.query, 6, 12));
@@ -98,8 +99,18 @@ async function main(): Promise<void> {
     transport: 'websocket',
     wsEndpoint: '/api/ws',
     strategySummaryEndpoint: '/api/runtime/strategy',
+    executionSummaryEndpoint: '/api/runtime/execution',
     paperStrategyEndpoint: '/api/paper/strategy',
     paperStrategySnapshotsEndpoint: '/api/paper/strategy/snapshots',
+    controlEndpoints: {
+      pause: '/api/control/pause',
+      resume: '/api/control/resume',
+      armLive: '/api/control/live/arm',
+      disarmLive: '/api/control/live/disarm',
+      flatten: '/api/control/flatten',
+      engageKillSwitch: '/api/control/kill-switch/engage',
+      releaseKillSwitch: '/api/control/kill-switch/release'
+    },
     note: 'Read endpoints are open. Paper strategy routes are sanitized and read-only. Control routes require a token.'
   }));
 
@@ -149,6 +160,58 @@ async function main(): Promise<void> {
     }
     store.setPaused(false);
     return { ok: true, paused: false };
+  });
+
+  app.post('/api/control/live/arm', async (request, reply) => {
+    if (!isAuthorized(request.headers as Record<string, unknown>)) {
+      return reply.code(401).send({ error: 'Unauthorized' });
+    }
+
+    try {
+      return await store.armLive();
+    } catch (error) {
+      return reply.code(409).send({ error: error instanceof Error ? error.message : 'Unable to arm live control plane.' });
+    }
+  });
+
+  app.post('/api/control/live/disarm', async (request, reply) => {
+    if (!isAuthorized(request.headers as Record<string, unknown>)) {
+      return reply.code(401).send({ error: 'Unauthorized' });
+    }
+
+    try {
+      return await store.disarmLive();
+    } catch (error) {
+      return reply.code(409).send({ error: error instanceof Error ? error.message : 'Unable to disarm live control plane.' });
+    }
+  });
+
+  app.post('/api/control/flatten', async (request, reply) => {
+    if (!isAuthorized(request.headers as Record<string, unknown>)) {
+      return reply.code(401).send({ error: 'Unauthorized' });
+    }
+
+    try {
+      return await store.flattenOpenPositions();
+    } catch (error) {
+      return reply.code(409).send({ error: error instanceof Error ? error.message : 'Unable to flatten positions.' });
+    }
+  });
+
+  app.post('/api/control/kill-switch/engage', async (request, reply) => {
+    if (!isAuthorized(request.headers as Record<string, unknown>)) {
+      return reply.code(401).send({ error: 'Unauthorized' });
+    }
+
+    return store.engageKillSwitch();
+  });
+
+  app.post('/api/control/kill-switch/release', async (request, reply) => {
+    if (!isAuthorized(request.headers as Record<string, unknown>)) {
+      return reply.code(401).send({ error: 'Unauthorized' });
+    }
+
+    return store.releaseKillSwitch();
   });
 
   app.get('/', async (_request, reply) => reply.sendFile('index.html'));
