@@ -55,6 +55,15 @@ async function createHarness(root: string): Promise<{
     polymarketProxy: null,
     polymarketProxyUrl: null,
     polymarketOperatorEligibility: 'unknown',
+    liveModeEnabled: false,
+    liveArmingEnabled: false,
+    liveExecution: {
+      enabled: false,
+      venue: 'polymarket',
+      maxQuoteAgeMs: 5_000,
+      maxReconcileAgeMs: 15_000,
+      missingOrderGraceMs: 30_000
+    },
     controlToken: 'trading-preference-smoke-token'
   } satisfies AppConfig
 

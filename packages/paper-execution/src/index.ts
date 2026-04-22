@@ -496,9 +496,15 @@ export class PaperExecutionAdapter {
       remainingQuantity: order.remainingQuantity,
       status: order.status,
       rejectionReason: order.rejectionReason ?? null,
+      venueOrderId: null,
+      venueStatus: null,
+      acknowledgedAt: null,
+      lastReconciledAt: null,
+      statusReason: null,
       quoteId: order.quoteId ?? null,
       referenceBid: order.referenceBid ?? null,
       referenceAsk: order.referenceAsk ?? null,
+      metadata: undefined,
       submittedAt: order.recordedAt,
       updatedAt: order.recordedAt
     };

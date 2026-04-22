@@ -8,6 +8,8 @@ import type {
   PaperStrategyView,
   RiskDecisionSummary,
   RuntimeEvent,
+  RuntimeExecutionSummary,
+  RuntimeLiveControl,
   RuntimeMarket,
   RuntimeMarketData,
   RuntimeModule,
@@ -21,8 +23,7 @@ import type {
 } from '../../../packages/contracts/src/index.js';
 import { strategyRuntimeSummarySchema, strategyStateSnapshotSchema, tradingPreferenceStateSchema } from '../../../packages/contracts/src/index.js';
 import { getOpenOrders, JsonlLedger, positionKeyFor, type IntentApprovedEvent, type LedgerProjection, type ProjectedOrder, type ProjectedPosition } from '../../../packages/ledger/src/index.js';
-import { describePolymarketAccess, describePolymarketTransport, fetchTopMarkets, type MarketSnapshot } from '../../../packages/market-data/src/index.js';
-import { PaperExecutionAdapter, type ApprovedTradeIntent } from '../../../packages/paper-execution/src/index.js';
+import { describePolymarketAccess, describePolymarketTransport, fetchTopMarkets, type MarketSnapshot } from '../../../packages/market-data/src/index.js';import { PaperExecutionAdapter, type ApprovedTradeIntent } from '../../../packages/paper-execution/src/index.js';
 import { OutboundTransport } from '../../../packages/transport/src/index.js';
 import { createPaperRiskConfig, evaluatePaperTradeRisk, type PaperRiskDecision, type RiskHooks } from '../../../packages/risk/src/index.js';
 import {
@@ -52,6 +53,7 @@ import {
   createStrategyStateSnapshot,
   type StrategyEvaluationPayload
 } from './strategy-runtime.js';
+import { createRuntimeExecutionSummary } from './execution-runtime.js';
 
 function isoNow(): string {
   return new Date().toISOString();
@@ -276,6 +278,67 @@ function buildTradingPreferenceState(profile: TradingPreferenceProfile = 'curren
   };
 }
 
+function inferOutcomeSide(market: RuntimeMarket, tokenId: string): 'yes' | 'no' {
+  if (market.noTokenId && tokenId === market.noTokenId) {
+    return 'no';
+  }
+  if (tokenId.endsWith(':no')) {
+    return 'no';
+  }
+  return 'yes';
+}
+
+function buildLiveControlSummary(live: RuntimeLiveControl): string {
+  if (live.killSwitchActive) {
+    return `Kill switch is active${live.killSwitchReason ? ` (${live.killSwitchReason})` : ''}. New entries stay blocked until an operator releases it.`;
+  }
+
+  if (!live.configured) {
+    return 'Paper-safe default. Live control plane is disabled for this process.';
+  }
+
+  if (!live.armable) {
+    return 'Live mode was requested in config, but process-level arming is disabled. No live adapter is installed, so venue writes stay blocked.';
+  }
+
+  if (live.armed) {
+    return 'Live control plane is armed at the operator layer, but no live adapter is installed yet, so venue writes remain blocked.';
+  }
+
+  return 'Live control plane is configured but disarmed. Paper execution remains authoritative until a live adapter exists.';
+}
+
+function createInitialLiveControl(config: AppConfig): RuntimeLiveControl {
+  const live = {
+    configured: config.liveModeEnabled,
+    armable: config.liveArmingEnabled,
+    armed: false,
+    liveAdapterReady: false,
+    killSwitchActive: false,
+    killSwitchReason: null,
+    flattenSupported: true,
+    lastOperatorAction: null,
+    lastOperatorActionAt: null,
+    summary: ''
+  } satisfies RuntimeLiveControl;
+
+  live.summary = buildLiveControlSummary(live);
+  return live;
+}
+
+function executionModuleStatus(state: RuntimeState): RuntimeModule['status'] {
+  if (state.execution.tradeStates.error > 0) {
+    return 'blocked';
+  }
+  if (state.execution.live.killSwitchActive || state.execution.tradeStates.reconcile > 0 || state.execution.live.armed) {
+    return 'warning';
+  }
+  if (state.execution.tradeStates.open > 0 || state.execution.tradeStates.pending > 0 || state.execution.live.configured) {
+    return 'healthy';
+  }
+  return 'blocked';
+}
+
 function buildModules(state: RuntimeState): RuntimeModule[] {
   return [
     { id: 'config', name: 'Config Gate', status: 'healthy', summary: 'Environment parsed, remote controls token-gated.' },
@@ -283,8 +346,8 @@ function buildModules(state: RuntimeState): RuntimeModule[] {
     {
       id: 'ledger',
       name: 'Paper Ledger',
-      status: state.strategy.positions.length > 0 || state.strategy.intents.some((intent) => intent.status === 'submitted') ? 'healthy' : 'warning',
-      summary: state.strategy.positions.length > 0 || state.strategy.intents.some((intent) => intent.status === 'submitted')
+      status: state.execution.trades.length > 0 ? 'healthy' : 'warning',
+      summary: state.execution.trades.length > 0
         ? 'Append-only JSONL paper ledger is recording intents, orders, fills, and position updates.'
         : 'Append-only paper ledger is wired, but no paper orders have been recorded yet.'
     },
@@ -303,9 +366,9 @@ function buildModules(state: RuntimeState): RuntimeModule[] {
     {
       id: 'execution',
       name: 'Execution Gateway',
-      status: state.strategy.positions.length > 0 || state.strategy.intents.some((intent) => intent.status === 'submitted') ? 'warning' : 'blocked',
-      summary: state.strategy.positions.length > 0 || state.strategy.intents.some((intent) => intent.status === 'submitted')
-        ? 'Paper execution is active against the append-only ledger. Live execution remains blocked.'
+      status: executionModuleStatus(state),
+      summary: state.execution.trades.length > 0 || state.execution.live.configured || state.execution.live.killSwitchActive
+        ? state.execution.summary
         : 'Live execution intentionally not implemented in milestone 1.'
     }
   ];
@@ -313,6 +376,7 @@ function buildModules(state: RuntimeState): RuntimeModule[] {
 
 function buildWatchlist(state: RuntimeState): WatchEntry[] {
   const route = resolveStrategyRuntimeRoute(state.tradingPreference.selected.profile);
+  const totalTrackedTrades = state.execution.tradeStates.pending + state.execution.tradeStates.reconcile + state.execution.tradeStates.open;
 
   return [
     {
@@ -331,7 +395,15 @@ function buildWatchlist(state: RuntimeState): WatchEntry[] {
       id: 'paper-mode',
       label: 'Paper mode only',
       status: 'active',
-      note: 'Live trading remains disarmed by design.'
+      note: state.execution.live.configured
+        ? `Paper execution is still authoritative while the live control plane is ${state.execution.live.armed ? 'armed' : 'disarmed'}.`
+        : 'Live trading remains disarmed by design.'
+    },
+    {
+      id: 'live-control-plane',
+      label: 'Live control plane',
+      status: state.execution.live.killSwitchActive ? 'disabled' : state.execution.live.configured ? 'active' : 'planned',
+      note: state.execution.live.summary
     },
     {
       id: 'strategy-runtime',
@@ -349,8 +421,8 @@ function buildWatchlist(state: RuntimeState): WatchEntry[] {
       id: 'paper-ledger',
       label: 'Paper ledger truth',
       status: 'active',
-      note: state.strategy.positions.length > 0
-        ? `Append-only paper ledger currently tracks ${state.strategy.positions.length} open paper position${state.strategy.positions.length === 1 ? '' : 's'}.`
+      note: totalTrackedTrades > 0
+        ? `Ledger tracks ${state.execution.tradeStates.pending} pending, ${state.execution.tradeStates.reconcile} reconcile, and ${state.execution.tradeStates.open} open trade state${totalTrackedTrades === 1 ? '' : 's'}.`
         : 'Append-only paper ledger is armed and ready for paper-only execution.'
     }
   ];
@@ -373,11 +445,29 @@ function createInitialState(config: AppConfig): RuntimeState {
     marketData,
     markets: [],
     strategy: {} as StrategyRuntimeSummary,
+    execution: {
+      requestedMode: config.liveModeEnabled ? 'live' : 'paper',
+      summary: config.liveModeEnabled
+        ? 'Live control plane is configured, but paper execution remains authoritative until a live adapter exists.'
+        : 'Paper execution remains the only writer. No ledger-backed trades have been recorded yet.',
+      tradeStates: {
+        pending: 0,
+        reconcile: 0,
+        open: 0,
+        closed: 0,
+        error: 0
+      },
+      trades: [],
+      live: createInitialLiveControl(config)
+    } satisfies RuntimeExecutionSummary,
     modules: [] as RuntimeModule[],
     watchlist: [] as WatchEntry[],
     events: [
       event('info', 'Phantom3 v2 bootstrap initialized.'),
       event('info', `Remote dashboard ${config.remoteDashboardEnabled ? 'enabled' : 'disabled'} at ${config.publicBaseUrl}`),
+      ...(config.liveModeEnabled
+        ? [event('warning', 'Live control plane is configured, but no live adapter is installed. Paper execution remains authoritative.')]
+        : []),
       event('warning', 'Execution remains disarmed while milestone 1 builds out read-only truth first.')
     ]
   } satisfies RuntimeState;
@@ -397,6 +487,7 @@ function createInitialState(config: AppConfig): RuntimeState {
 
 type RuntimeListener = (state: RuntimeState) => void;
 type PersistedRuntimeState = Partial<RuntimeState> & { strategySnapshots?: unknown } & Record<string, unknown>;
+type RuntimeProjection = Awaited<ReturnType<JsonlLedger['readProjection']>>;
 
 export class RuntimeStore {
   private readonly statePath: string;
@@ -431,18 +522,18 @@ export class RuntimeStore {
       const existing = JSON.parse(raw) as PersistedRuntimeState;
       this.strategySnapshots = this.hydrateStrategySnapshots(existing.strategySnapshots);
       this.state = this.hydrateState(existing);
-      reloadedPersistedState = true;
-    } catch {
-      this.state = createInitialState(this.config);
-    }
+  reloadedPersistedState = true;
+} catch {
+  this.state = createInitialState(this.config);
+}
 
-    const bootstrapPayload = await this.restoreLedgerTruth(this.currentStrategyPayload());
-    this.syncStrategyState('bootstrap', bootstrapPayload, { recordSnapshot: this.strategySnapshots.length === 0 });
+const bootstrapPayload = await this.restoreLedgerTruth(this.currentStrategyPayload());
+this.syncStrategyState('bootstrap', bootstrapPayload, { recordSnapshot: this.strategySnapshots.length === 0 });
+await this.refreshExecutionState();
 
-    if (reloadedPersistedState) {
-      this.pushEvent('info', 'Reloaded persisted bootstrap state.');
-    } else {
-      await this.persist();
+if (reloadedPersistedState) {
+  this.pushEvent('info', 'Reloaded persisted bootstrap state.');
+} else {      await this.persist();
     }
 
     await this.refreshMarketData();
@@ -505,6 +596,167 @@ export class RuntimeStore {
     return structuredClone(this.state.tradingPreference);
   }
 
+  async armLive(): Promise<{ ok: true; armed: boolean; changed: boolean }> {
+    const live = this.state.execution.live;
+    if (!live.configured) {
+      throw new Error('Live mode is not enabled for this process.');
+    }
+    if (!live.armable) {
+      throw new Error('Live mode was requested, but arming is disabled for this process.');
+    }
+    if (live.killSwitchActive) {
+      throw new Error('Cannot arm the live control plane while the kill switch is active.');
+    }
+    if (live.armed) {
+      return { ok: true, armed: true, changed: false };
+    }
+
+    this.replaceLiveControl({
+      ...live,
+      armed: true,
+      lastOperatorAction: 'arm-live',
+      lastOperatorActionAt: isoNow(),
+      summary: ''
+    });
+    await this.refreshExecutionState();
+    this.pushEvent('warning', 'Operator armed the live control plane. No live adapter is installed, so venue writes remain blocked.');
+    return { ok: true, armed: true, changed: true };
+  }
+
+  async disarmLive(): Promise<{ ok: true; armed: boolean; changed: boolean }> {
+    const live = this.state.execution.live;
+    if (!live.armed) {
+      return { ok: true, armed: false, changed: false };
+    }
+
+    this.replaceLiveControl({
+      ...live,
+      armed: false,
+      lastOperatorAction: 'disarm-live',
+      lastOperatorActionAt: isoNow(),
+      summary: ''
+    });
+    await this.refreshExecutionState();
+    this.pushEvent('info', 'Operator disarmed the live control plane.');
+    return { ok: true, armed: false, changed: true };
+  }
+
+  async engageKillSwitch(reason = 'operator-requested'): Promise<{ ok: true; active: boolean; changed: boolean }> {
+    const live = this.state.execution.live;
+    if (live.killSwitchActive && live.killSwitchReason === reason) {
+      return { ok: true, active: true, changed: false };
+    }
+
+    this.replaceLiveControl({
+      ...live,
+      armed: false,
+      killSwitchActive: true,
+      killSwitchReason: reason,
+      lastOperatorAction: 'engage-kill-switch',
+      lastOperatorActionAt: isoNow(),
+      summary: ''
+    });
+    await this.refreshExecutionState();
+    this.pushEvent('warning', `Operator engaged the global kill switch${reason ? ` (${reason})` : ''}. New entries are now blocked.`);
+    return { ok: true, active: true, changed: true };
+  }
+
+  async releaseKillSwitch(): Promise<{ ok: true; active: boolean; changed: boolean }> {
+    const live = this.state.execution.live;
+    if (!live.killSwitchActive) {
+      return { ok: true, active: false, changed: false };
+    }
+
+    this.replaceLiveControl({
+      ...live,
+      killSwitchActive: false,
+      killSwitchReason: null,
+      lastOperatorAction: 'release-kill-switch',
+      lastOperatorActionAt: isoNow(),
+      summary: ''
+    });
+    await this.refreshExecutionState();
+    this.pushEvent('info', 'Operator released the global kill switch.');
+    return { ok: true, active: false, changed: true };
+  }
+
+  async flattenOpenPositions(): Promise<{ ok: true; submitted: number; reconciling: number; skipped: number; errors: string[] }> {
+    if (this.state.marketData.stale || !this.state.marketData.syncedAt) {
+      throw new Error('Cannot flatten positions without a fresh market snapshot.');
+    }
+
+    let projection = await this.ledger.readProjection();
+    const openPositions = [...projection.positions.values()].filter((position) => position.status === 'open' && position.netQuantity > 0);
+    if (openPositions.length === 0) {
+      await this.refreshExecutionState(projection);
+      this.pushEvent('info', 'Operator requested flatten, but no open paper positions were available.');
+      return { ok: true, submitted: 0, reconciling: 0, skipped: 0, errors: [] };
+    }
+
+    const marketMap = this.marketMap();
+    const observedAt = this.state.marketData.syncedAt;
+    const errors: string[] = [];
+    let submitted = 0;
+    let reconciling = 0;
+    let skipped = 0;
+
+    for (const position of openPositions) {
+      const market = marketMap.get(position.marketId);
+      if (!market) {
+        skipped += 1;
+        errors.push(`Cannot flatten ${position.positionId}: current market snapshot is unavailable.`);
+        continue;
+      }
+
+      const openOrders = getOpenOrders(projection, { marketId: position.marketId, tokenId: position.tokenId });
+      if (openOrders.length > 0) {
+        skipped += 1;
+        errors.push(`Cannot flatten ${position.positionId} while ${openOrders.length} open order${openOrders.length === 1 ? '' : 's'} still need reconciliation.`);
+        continue;
+      }
+
+      const outcomeSide = inferOutcomeSide(market, position.tokenId);
+      const quote = createPaperQuote(market, outcomeSide, observedAt);
+      if (!quote || quote.bestBid == null) {
+        skipped += 1;
+        errors.push(`Cannot flatten ${position.positionId}: best bid is unavailable for ${market.question}.`);
+        continue;
+      }
+
+      const intent = this.createFlattenIntent(position, quote.bestBid, observedAt);
+      if (!intent) {
+        skipped += 1;
+        errors.push(`Cannot flatten ${position.positionId}: invalid quantity or price.`);
+        continue;
+      }
+
+      try {
+        const result = await this.paperExecution.submitApprovedIntent({ intent, quote });
+        projection = await this.ledger.readProjection();
+        submitted += 1;
+        if (result.status === 'open' || result.status === 'partially-filled') {
+          reconciling += 1;
+        }
+      } catch (error) {
+        skipped += 1;
+        errors.push(error instanceof Error ? error.message : `Unknown flatten error for ${position.positionId}.`);
+      }
+    }
+
+    await this.refreshExecutionState(projection);
+
+    if (submitted === 0 && errors.length > 0) {
+      this.pushEvent('warning', `Flatten request could not submit any orders. ${errors[0]}`);
+    } else if (submitted > 0) {
+      this.pushEvent(
+        errors.length > 0 || reconciling > 0 ? 'warning' : 'info',
+        `Operator submitted ${submitted} flatten order${submitted === 1 ? '' : 's'}${reconciling > 0 ? `; ${reconciling} still need reconciliation` : ''}${errors.length > 0 ? `; ${errors.length} position${errors.length === 1 ? '' : 's'} were skipped` : ''}.`
+      );
+    }
+
+    return { ok: true, submitted, reconciling, skipped, errors };
+  }
+
   heartbeat(): void {
     this.state.lastHeartbeatAt = isoNow();
     this.schedulePersist();
@@ -525,12 +777,13 @@ export class RuntimeStore {
 
   private hydrateState(existing: PersistedRuntimeState): RuntimeState {
     const base = createInitialState(this.config);
-    const { strategySnapshots: _strategySnapshots, strategy, ...rest } = existing;
-    const marketData = buildMarketDataState(this.config, {
-      ...(typeof existing.marketData === 'object' && existing.marketData ? existing.marketData : {})
-    });
+    const { strategySnapshots: _strategySnapshots, strategy, execution: _execution, ...rest } = existing;
+    const marketData = {
+      ...base.marketData,
+      ...(typeof existing.marketData === 'object' && existing.marketData ? existing.marketData : {}),
+      refreshIntervalMs: this.config.marketRefreshMs
+    } as RuntimeMarketData;
     const persistedTradingPreference = tradingPreferenceStateSchema.safeParse(existing.tradingPreference);
-
     const markets = this.config.polymarketOperatorEligibility === 'restricted'
       ? base.markets
       : Array.isArray(existing.markets)
@@ -540,6 +793,7 @@ export class RuntimeStore {
     const tradingPreference = buildTradingPreferenceState(
       persistedTradingPreference.success ? persistedTradingPreference.data.selected.profile : base.tradingPreference.selected.profile
     );
+    const live = this.hydrateLiveControl(existing, base);
 
     const hydratedState = {
       ...base,
@@ -550,7 +804,15 @@ export class RuntimeStore {
       tradingPreference,
       marketData,
       markets,
-      events
+      events,
+      execution: {
+        ...base.execution,
+        requestedMode: live.configured ? 'live' : 'paper',
+        live,
+        tradeStates: base.execution.tradeStates,
+        trades: [],
+        summary: base.execution.summary
+      }
     } satisfies RuntimeState;
 
     const persistedStrategy = strategyRuntimeSummarySchema.safeParse(strategy);
@@ -580,6 +842,36 @@ export class RuntimeStore {
         return parsed.success ? [parsed.data] : [];
       })
       .slice(0, MAX_STRATEGY_SNAPSHOTS);
+  }
+
+  private hydrateLiveControl(existing: PersistedRuntimeState, base: RuntimeState): RuntimeLiveControl {
+    const persistedExecution = typeof existing.execution === 'object' && existing.execution ? existing.execution : null;
+    const persistedLive = persistedExecution && typeof persistedExecution === 'object' && 'live' in persistedExecution
+      ? persistedExecution.live
+      : null;
+
+    const live = {
+      ...base.execution.live,
+      armed: false,
+      killSwitchActive: persistedLive && typeof persistedLive === 'object' && 'killSwitchActive' in persistedLive && typeof persistedLive.killSwitchActive === 'boolean'
+        ? persistedLive.killSwitchActive
+        : base.execution.live.killSwitchActive,
+      killSwitchReason: persistedLive && typeof persistedLive === 'object' && 'killSwitchReason' in persistedLive
+        ? typeof persistedLive.killSwitchReason === 'string' || persistedLive.killSwitchReason === null
+          ? persistedLive.killSwitchReason
+          : base.execution.live.killSwitchReason
+        : base.execution.live.killSwitchReason,
+      lastOperatorAction: persistedLive && typeof persistedLive === 'object' && 'lastOperatorAction' in persistedLive && typeof persistedLive.lastOperatorAction === 'string'
+        ? persistedLive.lastOperatorAction
+        : base.execution.live.lastOperatorAction,
+      lastOperatorActionAt: persistedLive && typeof persistedLive === 'object' && 'lastOperatorActionAt' in persistedLive && typeof persistedLive.lastOperatorActionAt === 'string'
+        ? persistedLive.lastOperatorActionAt
+        : base.execution.live.lastOperatorActionAt,
+      summary: ''
+    } satisfies RuntimeLiveControl;
+
+    live.summary = buildLiveControlSummary(live);
+    return live;
   }
 
   private currentStrategyPayload(strategy = this.state.strategy): StrategyEvaluationPayload {
@@ -945,11 +1237,40 @@ export class RuntimeStore {
     };
   }
 
+  private async refreshExecutionState(projection?: RuntimeProjection): Promise<void> {
+    const nextProjection = projection ?? await this.ledger.readProjection();
+    const live = {
+      ...this.state.execution.live,
+      summary: buildLiveControlSummary(this.state.execution.live)
+    } satisfies RuntimeLiveControl;
+
+    this.state.execution = createRuntimeExecutionSummary(this.state, nextProjection, live);
+    this.state.modules = buildModules(this.state);
+    this.state.watchlist = buildWatchlist(this.state);
+  }
+
+  private replaceLiveControl(next: RuntimeLiveControl): void {
+    const normalized = {
+      ...next,
+      armed: next.killSwitchActive ? false : next.armed,
+      liveAdapterReady: false,
+      flattenSupported: true,
+      summary: ''
+    } satisfies RuntimeLiveControl;
+
+    normalized.summary = buildLiveControlSummary(normalized);
+    this.state.execution = {
+      ...this.state.execution,
+      requestedMode: normalized.configured ? 'live' : 'paper',
+      live: normalized
+    };
+  }
+
   private marketMap(markets = this.state.markets): Map<string, RuntimeMarket> {
     return new Map(markets.map((market) => [market.id, market]));
   }
 
-  private recentIntentExists(projection: Awaited<ReturnType<JsonlLedger['readProjection']>>, marketId: string, tokenId: string, now: string): boolean {
+  private recentIntentExists(projection: RuntimeProjection, marketId: string, tokenId: string, now: string): boolean {
     const nowMs = Date.parse(now);
     return [...projection.intents.values()].some((intent) => {
       const recordedAt = Date.parse(intent.recordedAt);
@@ -964,7 +1285,7 @@ export class RuntimeStore {
   }
 
   private shouldSubmitEntry(
-    projection: Awaited<ReturnType<JsonlLedger['readProjection']>>,
+    projection: RuntimeProjection,
     marketId: string,
     tokenId: string,
     now: string
@@ -987,6 +1308,22 @@ export class RuntimeStore {
     tokenId: string
   ): boolean {
     return this.findOpenSellOrder(projection, marketId, tokenId) == null;
+  }
+
+  private currentRiskHooks() {
+    if (!this.state.execution.live.killSwitchActive) {
+      return undefined;
+    }
+
+    return {
+      killSwitch: {
+        global: {
+          active: true,
+          reason: this.state.execution.live.killSwitchReason ?? 'operator-requested',
+          triggeredAt: this.state.execution.live.lastOperatorActionAt ?? isoNow()
+        }
+      }
+    };
   }
 
   private buildRiskDecisionSummary(
@@ -1134,6 +1471,48 @@ export class RuntimeStore {
 
   private createRuntimeExitIntentId(positionId: string, observedAt: string): string {
     return `exit-${positionId}-${observedAt}`.replace(/[^a-z0-9]+/gi, '-').toLowerCase();
+  }
+
+  private createFlattenIntent(position: ProjectedPosition, bestBid: number, observedAt: string): ApprovedTradeIntent | null {
+    const quantity = Math.round(position.netQuantity * 1_000_000) / 1_000_000;
+    if (!Number.isFinite(quantity) || quantity <= 0 || !Number.isFinite(bestBid) || bestBid <= 0) {
+      return null;
+    }
+
+    return {
+      sessionId: 'phantom3-v2-operator-control',
+      intentId: `flatten-${position.positionId}-${observedAt.replace(/[:.]/g, '-')}`,
+      strategyId: 'operator-flatten',
+      marketId: position.marketId,
+      tokenId: position.tokenId,
+      side: 'sell',
+      limitPrice: bestBid,
+      quantity,
+      approvedAt: observedAt,
+      thesis: 'Operator-requested flatten.',
+      confidence: null,
+      metadata: {
+        kind: 'flatten',
+        source: 'control-api'
+      }
+    };
+  }
+
+  private async reconcileOpenPaperOrders(snapshot: MarketSnapshot): Promise<number> {
+    let filledOrderCount = 0;
+
+    for (const market of snapshot.markets) {
+      for (const side of ['yes', 'no'] as const) {
+        const quote = createPaperQuote(market, side, snapshot.fetchedAt);
+        if (!quote) {
+          continue;
+        }
+        const result = await this.paperExecution.reconcileQuote(quote);
+        filledOrderCount += result.filledOrderIds.length;
+      }
+    }
+
+    return filledOrderCount;
   }
 
   private createApprovedExitIntent(input: {
@@ -1305,8 +1684,8 @@ export class RuntimeStore {
         },
         market: riskMarket,
         positions: riskPositions,
-        config: riskConfig,
-        now: snapshot.fetchedAt
+config: riskConfig,
+hooks: this.currentRiskHooks(),        now: snapshot.fetchedAt
       });
 
       riskDecisions.push(this.buildRiskDecisionSummary(riskDecision, {
@@ -1458,32 +1837,34 @@ export class RuntimeStore {
 
     const notes = [
       'Append-only paper ledger is active for paper intents, orders, fills, and positions.',
-      managedProfileActive
-        ? 'Legacy early-exit live/managed profile is selected in paper mode only. Managed exits and session guards are active while live execution remains disarmed.'
-        : 'Current runtime is using the routed paper entry and exit baseline.',
-      sessionGuard
-        ? sessionGuard.status === 'clear'
-          ? `Managed paper session guard is clear with realized P&L ${formatUsd(sessionGuard.realizedPnlUsd)}.`
-          : `Managed paper session guard is ${sessionGuard.status}: ${sessionGuard.reasons.map((reason) => reason.message).join(' ')}`
-        : 'Session guard scaffolding is inactive for this trading preference.',
-      submittedEntryCount > 0
-        ? `Submitted ${submittedEntryCount} new paper entry intent${submittedEntryCount === 1 ? '' : 's'} on the latest evaluation.`
-        : route.entryPolicy === 'emit-new-entries'
-          ? 'No new paper entries were submitted on the latest evaluation.'
-          : referenceBaselineCandidateCount > 0
-            ? `${route.requested.label} is reference-only, so ${referenceBaselineCandidateCount} baseline candidate${referenceBaselineCandidateCount === 1 ? '' : 's'} stayed visible but no new paper entries were emitted.`
-            : `${route.requested.label} is reference-only, so new paper entry emission stayed parked on the latest evaluation.`,
-      submittedExitCount > 0
-        ? `Submitted ${submittedExitCount} reduce-only paper exit intent${submittedExitCount === 1 ? '' : 's'} on the latest evaluation.`
-        : triggeredExitCount > 0
-          ? `Flagged ${triggeredExitCount} open paper position${triggeredExitCount === 1 ? '' : 's'} for reduce-only exit review.`
-          : armedExitCount > 0
-            ? `Tracked ${armedExitCount} armed paper exit plan${armedExitCount === 1 ? '' : 's'} across open positions.`
-            : 'No paper exits are armed because no paper positions are open.',
-      workingExitCount > 0
-        ? `There ${workingExitCount === 1 ? 'is' : 'are'} ${workingExitCount} reduce-only paper exit order${workingExitCount === 1 ? '' : 's'} still working in the ledger.`
-        : 'Open positions now expose typed paper exit state, and the runtime only submits reduce-only paper exits.'
-    ];
+managedProfileActive
+  ? 'Legacy early-exit live/managed profile is selected in paper mode only. Managed exits and session guards are active while live execution remains disarmed.'
+  : 'Current runtime is using the routed paper entry and exit baseline.',
+sessionGuard
+  ? sessionGuard.status === 'clear'
+    ? `Managed paper session guard is clear with realized P&L ${formatUsd(sessionGuard.realizedPnlUsd)}.`
+    : `Managed paper session guard is ${sessionGuard.status}: ${sessionGuard.reasons.map((reason) => reason.message).join(' ')}`
+  : 'Session guard scaffolding is inactive for this trading preference.',
+submittedEntryCount > 0
+  ? `Submitted ${submittedEntryCount} new paper entry intent${submittedEntryCount === 1 ? '' : 's'} on the latest evaluation.`
+  : route.entryPolicy === 'emit-new-entries'
+    ? 'No new paper entries were submitted on the latest evaluation.'
+    : referenceBaselineCandidateCount > 0
+      ? `${route.requested.label} is reference-only, so ${referenceBaselineCandidateCount} baseline candidate${referenceBaselineCandidateCount === 1 ? '' : 's'} stayed visible but no new paper entries were emitted.`
+      : `${route.requested.label} is reference-only, so new paper entry emission stayed parked on the latest evaluation.`,
+this.state.execution.live.killSwitchActive
+  ? 'Kill switch is active, so new entry intents stay blocked until an operator releases it.'
+  : 'Kill switch is inactive.',
+submittedExitCount > 0
+  ? `Submitted ${submittedExitCount} reduce-only paper exit intent${submittedExitCount === 1 ? '' : 's'} on the latest evaluation.`
+  : triggeredExitCount > 0
+    ? `Flagged ${triggeredExitCount} open paper position${triggeredExitCount === 1 ? '' : 's'} for reduce-only exit review.`
+    : armedExitCount > 0
+      ? `Tracked ${armedExitCount} armed paper exit plan${armedExitCount === 1 ? '' : 's'} across open positions.`
+      : 'No paper exits are armed because no paper positions are open.',
+workingExitCount > 0
+  ? `There ${workingExitCount === 1 ? 'is' : 'are'} ${workingExitCount} reduce-only paper exit order${workingExitCount === 1 ? '' : 's'} still working in the ledger.`
+  : 'Open positions now expose typed paper exit state, and the runtime only submits reduce-only paper exits.'    ];
 
     this.syncStrategyState(trigger, {
       report,
@@ -1493,6 +1874,7 @@ export class RuntimeStore {
       notes,
       lastEvaluatedAt: snapshot.fetchedAt
     });
+    await this.refreshExecutionState(projection);
   }
 
   private async doRefreshMarketData(): Promise<void> {
@@ -1512,9 +1894,15 @@ export class RuntimeStore {
         transport: snapshot.transport,
         access: snapshot.access
       });
+
+      const reconciledOrders = await this.reconcileOpenPaperOrders(snapshot);
       await this.evaluateStrategy('market-refresh', snapshot);
       this.schedulePersist();
       this.notify();
+
+      if (reconciledOrders > 0) {
+        this.pushEvent('info', `Reconciled ${reconciledOrders} open paper order${reconciledOrders === 1 ? '' : 's'} against the latest quote.`);
+      }
 
       if (this.marketSyncState !== 'ok') {
         this.marketSyncState = 'ok';
@@ -1539,6 +1927,7 @@ export class RuntimeStore {
         notes: [...this.currentStrategyPayload().notes ?? [], `Latest market refresh failed: ${message}`],
         lastEvaluatedAt: this.state.marketData.syncedAt ?? isoNow()
       }, { recordSnapshot: shouldRecordSnapshot });
+      await this.refreshExecutionState();
       this.schedulePersist();
       this.notify();
 

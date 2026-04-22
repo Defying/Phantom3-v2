@@ -2,6 +2,7 @@ import type {
   FillRecordedEvent,
   IntentApprovedEvent,
   LedgerEnvelope,
+  OperatorActionEvent,
   OrderUpdatedEvent,
   PositionTransition,
   PositionUpdatedEvent
@@ -45,9 +46,15 @@ export type ProjectedOrder = {
   remainingQuantity: number;
   status: OrderUpdatedEvent['status'];
   rejectionReason: string | null;
+  venueOrderId: string | null;
+  venueStatus: string | null;
+  acknowledgedAt: string | null;
+  lastReconciledAt: string | null;
+  statusReason: string | null;
   quoteId: string | null;
   referenceBid: number | null;
   referenceAsk: number | null;
+  metadata: Record<string, unknown> | undefined;
   submittedAt: string;
   updatedAt: string;
 };
@@ -61,6 +68,13 @@ export type PositionPreview = {
   closedLotIds: string[];
 };
 
+export type KillSwitchState = {
+  active: boolean;
+  triggeredAt: string | null;
+  releasedAt: string | null;
+  reason: string | null;
+};
+
 export type LedgerProjection = {
   latestSequence: number;
   intents: Map<string, IntentApprovedEvent>;
@@ -68,6 +82,8 @@ export type LedgerProjection = {
   fills: FillRecordedEvent[];
   positions: Map<string, ProjectedPosition>;
   positionEvents: PositionUpdatedEvent[];
+  operatorActions: OperatorActionEvent[];
+  killSwitch: KillSwitchState;
   anomalies: string[];
 };
 
@@ -221,10 +237,14 @@ export function applyFillToPosition(current: ProjectedPosition | undefined, fill
   };
 }
 
-export function getOpenOrders(projection: LedgerProjection, filter?: { marketId?: string; tokenId?: string }): ProjectedOrder[] {
+export function isActiveOrderStatus(status: OrderUpdatedEvent['status']): boolean {
+  return ['pending-submit', 'pending-ack', 'open', 'partially-filled', 'cancel-pending', 'reconcile'].includes(status);
+}
+
+export function getActiveOrders(projection: LedgerProjection, filter?: { marketId?: string; tokenId?: string }): ProjectedOrder[] {
   return [...projection.orders.values()]
     .filter((order) => {
-      if (!(order.status === 'open' || order.status === 'partially-filled')) {
+      if (!isActiveOrderStatus(order.status)) {
         return false;
       }
       if (filter?.marketId && order.marketId !== filter.marketId) {
@@ -233,9 +253,13 @@ export function getOpenOrders(projection: LedgerProjection, filter?: { marketId?
       if (filter?.tokenId && order.tokenId !== filter.tokenId) {
         return false;
       }
-      return order.remainingQuantity > LEDGER_EPSILON;
+      return order.remainingQuantity > LEDGER_EPSILON || order.status === 'reconcile';
     })
     .sort((left, right) => left.submittedAt.localeCompare(right.submittedAt));
+}
+
+export function getOpenOrders(projection: LedgerProjection, filter?: { marketId?: string; tokenId?: string }): ProjectedOrder[] {
+  return getActiveOrders(projection, filter).filter((order) => order.status === 'open' || order.status === 'partially-filled');
 }
 
 export function projectLedgerState(envelopes: readonly LedgerEnvelope[]): LedgerProjection {
@@ -244,6 +268,13 @@ export function projectLedgerState(envelopes: readonly LedgerEnvelope[]): Ledger
   const fills: FillRecordedEvent[] = [];
   const positions = new Map<string, ProjectedPosition>();
   const positionEvents: PositionUpdatedEvent[] = [];
+  const operatorActions: OperatorActionEvent[] = [];
+  let killSwitch: KillSwitchState = {
+    active: false,
+    triggeredAt: null,
+    releasedAt: null,
+    reason: null
+  };
   const anomalies: string[] = [];
   const sortedEnvelopes = [...envelopes].sort((left, right) => left.sequence - right.sequence);
 
@@ -270,9 +301,16 @@ export function projectLedgerState(envelopes: readonly LedgerEnvelope[]): Ledger
           remainingQuantity: event.remainingQuantity,
           status: event.status,
           rejectionReason: event.rejectionReason ?? null,
-          quoteId: event.quoteId ?? null,
-          referenceBid: event.referenceBid ?? null,
-          referenceAsk: event.referenceAsk ?? null,
+          venueOrderId: event.venueOrderId === undefined ? existing?.venueOrderId ?? null : event.venueOrderId,
+          venueStatus: event.venueStatus === undefined ? existing?.venueStatus ?? null : event.venueStatus,
+          acknowledgedAt: event.acknowledgedAt === undefined ? existing?.acknowledgedAt ?? null : event.acknowledgedAt,
+          lastReconciledAt:
+            event.lastReconciledAt === undefined ? existing?.lastReconciledAt ?? null : event.lastReconciledAt,
+          statusReason: event.statusReason === undefined ? existing?.statusReason ?? null : event.statusReason,
+          quoteId: event.quoteId === undefined ? existing?.quoteId ?? null : event.quoteId,
+          referenceBid: event.referenceBid === undefined ? existing?.referenceBid ?? null : event.referenceBid,
+          referenceAsk: event.referenceAsk === undefined ? existing?.referenceAsk ?? null : event.referenceAsk,
+          metadata: event.metadata === undefined ? existing?.metadata : event.metadata,
           submittedAt: existing?.submittedAt ?? event.recordedAt,
           updatedAt: event.recordedAt
         });
@@ -292,6 +330,26 @@ export function projectLedgerState(envelopes: readonly LedgerEnvelope[]): Ledger
         positionEvents.push(event);
         break;
       }
+      case 'operator.action': {
+        operatorActions.push(event);
+        if (event.action === 'kill-switch-engaged') {
+          killSwitch = {
+            active: true,
+            triggeredAt: event.recordedAt,
+            releasedAt: null,
+            reason: event.note ?? null
+          };
+        }
+        if (event.action === 'kill-switch-released') {
+          killSwitch = {
+            active: false,
+            triggeredAt: killSwitch.triggeredAt,
+            releasedAt: event.recordedAt,
+            reason: event.note ?? killSwitch.reason
+          };
+        }
+        break;
+      }
       default: {
         const exhaustiveCheck: never = event;
         void exhaustiveCheck;
@@ -306,6 +364,8 @@ export function projectLedgerState(envelopes: readonly LedgerEnvelope[]): Ledger
     fills,
     positions,
     positionEvents,
+    operatorActions,
+    killSwitch,
     anomalies
   };
 }

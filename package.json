@@ -16,6 +16,8 @@
     "runtime:status": "./scripts/phantom3-runtime.sh status",
     "runtime:logs": "./scripts/phantom3-runtime.sh logs",
     "runtime:launchd:print": "./scripts/phantom3-runtime.sh launchd-print",
+    "test:live-safety": "node --import tsx --test packages/paper-execution/src/live-safety.regression.test.ts",
+    "verify:live-safety": "npm run check && npm run test:live-safety",
     "verify:mullvad-config-safety": "node scripts/verify-mullvad-config-safety.mjs",
     "verify:mullvad-socks5": "node scripts/verify-mullvad-socks5.mjs",
     "verify:paper-safe": "node scripts/verify-paper-safe.mjs",

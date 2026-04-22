@@ -12,6 +12,9 @@ Conservative paper execution adapter for Phantom3 v2.
   - buy at `bestAsk`
   - sell at `bestBid`
 - supports partial fills and later quote-driven reconciliation of open paper orders
+- keeps positions ledger-first: working orders alone never open, close, or flatten lots
+- computes realized P&L from recorded fill prices plus fees, not requested prices or midpoint estimates
+- ships a regression harness for the old v1 failure modes via `npm run verify:live-safety`
 
 ## Primary exports
 

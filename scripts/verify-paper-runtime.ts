@@ -363,6 +363,15 @@ async function main(): Promise<void> {
         polymarketProxy: proxy,
         polymarketProxyUrl: proxy.url,
         polymarketOperatorEligibility: 'confirmed-eligible',
+        liveModeEnabled: false,
+        liveArmingEnabled: false,
+        liveExecution: {
+          enabled: false,
+          venue: 'polymarket',
+          maxQuoteAgeMs: 5_000,
+          maxReconcileAgeMs: 15_000,
+          missingOrderGraceMs: 30_000
+        },
         controlToken: 'paper-runtime-smoke-token'
       } satisfies AppConfig
 
