@@ -267,6 +267,53 @@ test('kill switch latches across restart and only releases once the live book is
   assert.equal(harness.requests.length, 3);
 });
 
+test('flatten fails closed while same-market live buy orders are still working', async () => {
+  const harness = await createHarness({
+    responses: [
+      (request) => ({
+        transportStatus: 'acknowledged',
+        order: makeVenueOrder(request, {
+          status: 'filled',
+          filledQuantity: request.intent.quantity,
+          remainingQuantity: 0
+        }),
+        fills: [makeVenueFill(request, { price: 0.41 })]
+      }),
+      (request) => ({
+        transportStatus: 'acknowledged',
+        order: makeVenueOrder(request, { status: 'open' })
+      })
+    ]
+  });
+
+  await harness.adapter.submitApprovedIntent({
+    intent: makeIntent({ intentId: 'buy-entry', side: 'buy', limitPrice: 0.45, quantity: 5 }),
+    quote: makeQuote({ quoteId: 'quote-entry', bestBid: 0.4, bestAsk: 0.41, midpoint: 0.405 })
+  });
+
+  const workingBuy = await harness.adapter.submitApprovedIntent({
+    intent: makeIntent({ intentId: 'buy-still-working', side: 'buy', limitPrice: 0.4, quantity: 1 }),
+    quote: makeQuote({ quoteId: 'quote-working-buy', bestBid: 0.39, bestAsk: 0.4, midpoint: 0.395 })
+  });
+  assert.equal(workingBuy.status, 'open');
+
+  await assert.rejects(
+    harness.adapter.requestFlatten({
+      sessionId: SESSION_ID,
+      marketId: MARKET_ID,
+      tokenId: TOKEN_ID,
+      note: 'operator flatten',
+      quote: makeQuote({ quoteId: 'quote-flatten-blocked', bestBid: 0.5, bestAsk: 0.51, midpoint: 0.505 })
+    }),
+    /same-market live buy order/i
+  );
+
+  const projection = await harness.ledger.readProjection();
+  assert.equal(projection.operatorActions.some((event) => event.action === 'flatten-requested'), false);
+  assert.equal(harness.requests.length, 2);
+  assert.equal(getOpenOrders(projection).some((order) => order.orderId === workingBuy.orderId), true);
+});
+
 test('flatten stays reduce-only, restart preserves working exits, and resting sells do not close positions locally', async () => {
   const harness = await createHarness({
     responses: [

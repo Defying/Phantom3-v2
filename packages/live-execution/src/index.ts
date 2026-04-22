@@ -528,6 +528,15 @@ export class LiveExecutionAdapter {
 
     const quote = paperQuoteSchema.parse(input.quote);
     const projection = await this.ledger.readProjection();
+    const blockingEntryOrders = getActiveOrders(projection, { marketId: input.marketId, tokenId: input.tokenId })
+      .filter((order) => order.side === 'buy');
+
+    if (blockingEntryOrders.length > 0) {
+      throw new Error(
+        `Cannot flatten ${input.marketId}/${input.tokenId} while ${blockingEntryOrders.length} same-market live buy order${blockingEntryOrders.length === 1 ? '' : 's'} still remain active.`
+      );
+    }
+
     const position = projection.positions.get(positionKeyFor(input.marketId, input.tokenId));
     const reservedSellQuantity = this.getReservedSellQuantity(projection, input.marketId, input.tokenId);
     const quantity = Math.max(0, (position?.netQuantity ?? 0) - reservedSellQuantity);

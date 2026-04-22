@@ -162,6 +162,7 @@ Reference files:
 - container-only Mullvad input handling: `docs/runbooks/MULLVAD_WIREGUARD_CONTAINER_INPUTS.md`
 - Mullvad SOCKS5 Compose runbook: `docs/runbooks/MULLVAD_SOCKS5_COMPOSE_RUNBOOK.md`
 - future live thin-slice review checklist: `docs/qa/LIVE_THIN_SLICE_REVIEW_CHECKLIST.md`
+- live thin-slice no-go runbook: `docs/runbooks/LIVE_THIN_SLICE_OPERATOR_RUNBOOK.md`
 
 ## Important safety notes
 
@@ -177,8 +178,9 @@ Reference files:
 - the optional Mullvad SOCKS5 path only affects explicitly proxied container traffic, not the host machine
 - proxy exit geography does not change venue rules, geoblocks, or compliance obligations
 - live mode is not implemented in this bootstrap
-- before any live thin-slice PR is treated as ready for review, run `npm run verify:live-safety`
+- before any live thin-slice PR is treated as ready for review, run `npm run verify:live-safety` and read `docs/runbooks/LIVE_THIN_SLICE_OPERATOR_RUNBOOK.md`
 - a passing `npm run verify:paper-safe` only confirms static guardrails and docs markers, not trading safety or readiness
+- a passing `npm run verify:live-safety` is still a guardrail check, not proof of live-capital readiness
 - `npm run verify:paper-runtime` is a local smoke test for ledger projection invariants, bootstrap restart truth, and the sanitized paper API shape
 - `npm run verify:trading-preference` is a local scenario verifier for token-gated control behavior, persisted preference state, honest legacy-reference exposure, and doc-backed parity thresholds
 
