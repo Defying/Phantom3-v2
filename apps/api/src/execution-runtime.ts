@@ -1,10 +1,11 @@
-import type {
-  RuntimeExecutionSummary,
-  RuntimeLiveControl,
-  RuntimeMarket,
-  RuntimeState,
-  RuntimeTradeStateCounts,
-  RuntimeTradeSummary
+import {
+  RUNTIME_MIDPOINT_REFERENCE_PRICE_SOURCE,
+  type RuntimeExecutionSummary,
+  type RuntimeLiveControl,
+  type RuntimeMarket,
+  type RuntimeState,
+  type RuntimeTradeStateCounts,
+  type RuntimeTradeSummary
 } from '../../../packages/contracts/src/index.js';
 import { getOpenOrders, type LedgerProjection } from '../../../packages/ledger/src/index.js';
 
@@ -24,11 +25,15 @@ function round(value: number, digits = 4): number {
   return Math.round(value * factor) / factor;
 }
 
-function sidePrice(market: RuntimeMarket | null, side: 'yes' | 'no'): number | null {
+function sideMidpointReferencePrice(market: RuntimeMarket | null, side: 'yes' | 'no'): number | null {
   if (!market) {
     return null;
   }
   return side === 'yes' ? market.yesPrice : market.noPrice;
+}
+
+function marketPriceSource(market: RuntimeMarket | null): RuntimeMarket['priceSource'] {
+  return market?.priceSource ?? RUNTIME_MIDPOINT_REFERENCE_PRICE_SOURCE;
 }
 
 function inferOutcomeSide(market: RuntimeMarket | null, tokenId: string): 'yes' | 'no' {
@@ -129,11 +134,11 @@ function createTradeSummary(
   const filledQuantity = round(orders.reduce((sum, order) => sum + order.filledQuantity, 0), 6);
   const remainingQuantity = round(openOrders.reduce((sum, order) => sum + order.remainingQuantity, 0), 6);
   const positionQuantity = round(position?.netQuantity ?? 0, 6);
-  const markPrice = sidePrice(market, side);
+  const referenceMarkPrice = sideMidpointReferencePrice(market, side);
   const averageEntryPrice = position?.averageEntryPrice == null ? null : round(position.averageEntryPrice);
-  const unrealizedPnlUsd = markPrice == null || !position || position.netQuantity <= EPSILON || position.averageEntryPrice == null
+  const unrealizedPnlUsd = referenceMarkPrice == null || !position || position.netQuantity <= EPSILON || position.averageEntryPrice == null
     ? null
-    : round((markPrice - position.averageEntryPrice) * position.netQuantity, 2);
+    : round((referenceMarkPrice - position.averageEntryPrice) * position.netQuantity, 2);
   const realizedPnlUsd = position ? round(position.realizedPnl, 2) : fills.length > 0 ? 0 : null;
   const hasProjectionAnomaly = projection.anomalies.some((entry) => entry.includes(group.key) || entry.includes(group.marketId));
   const rejectionReason = orders.find((order) => order.rejectionReason)?.rejectionReason ?? null;
@@ -193,7 +198,8 @@ function createTradeSummary(
     remainingQuantity,
     positionQuantity,
     averageEntryPrice,
-    markPrice: markPrice == null ? null : round(markPrice),
+    markPrice: referenceMarkPrice == null ? null : round(referenceMarkPrice),
+    markPriceSource: referenceMarkPrice == null ? undefined : marketPriceSource(market),
     realizedPnlUsd,
     unrealizedPnlUsd,
     openedAt,

@@ -17,11 +17,29 @@ export type JsonRequestOptions = {
   signal?: AbortSignal;
   timeoutMs?: number;
   headers?: Record<string, string>;
+  body?: unknown;
 };
+
+export type JsonRequestMethod = 'GET' | 'POST' | 'DELETE';
 
 export type OutboundTransportOptions = {
   proxy?: SocksProxyConfig | null;
 };
+
+export class OutboundTransportError extends Error {
+  constructor(
+    readonly method: JsonRequestMethod,
+    readonly url: string,
+    readonly status: number,
+    readonly responseBody?: unknown
+  ) {
+    const detail = responseBody != null && typeof responseBody === 'object' && 'error' in responseBody && typeof responseBody.error === 'string'
+      ? `: ${responseBody.error}`
+      : '';
+    super(`HTTP ${status} for ${method} ${url}${detail}`);
+    this.name = 'OutboundTransportError';
+  }
+}
 
 function trimTrailingColon(value: string): string {
   return value.endsWith(':') ? value.slice(0, -1) : value;
@@ -79,21 +97,42 @@ export class OutboundTransport {
     this.socketAgent = this.proxy ? new SocksProxyAgent(this.proxy.url) : null;
   }
 
-  async getJson<T>(url: string, options: JsonRequestOptions = {}): Promise<T> {
-    const response = await this.http.get<T>(url, {
+  async requestJson<T>(method: JsonRequestMethod, url: string, options: JsonRequestOptions = {}): Promise<T> {
+    const response = await this.http.request<T>({
+      method,
+      url,
       signal: options.signal,
       timeout: options.timeoutMs,
       headers: options.headers,
+      data: options.body,
       responseType: 'json',
       httpAgent: this.socketAgent ?? undefined,
       httpsAgent: this.socketAgent ?? undefined
     });
 
     if (response.status < 200 || response.status >= 300) {
-      throw new Error(`HTTP ${response.status} for ${url}`);
+      throw new OutboundTransportError(method, url, response.status, response.data);
     }
 
     return response.data;
+  }
+
+  async getJson<T>(url: string, options: JsonRequestOptions = {}): Promise<T> {
+    return this.requestJson('GET', url, options);
+  }
+
+  async postJson<T>(url: string, body?: unknown, options: Omit<JsonRequestOptions, 'body'> = {}): Promise<T> {
+    return this.requestJson('POST', url, {
+      ...options,
+      body
+    });
+  }
+
+  async deleteJson<T>(url: string, body?: unknown, options: Omit<JsonRequestOptions, 'body'> = {}): Promise<T> {
+    return this.requestJson('DELETE', url, {
+      ...options,
+      body
+    });
   }
 
   webSocketOptions(): { agent?: SocksProxyAgent } {

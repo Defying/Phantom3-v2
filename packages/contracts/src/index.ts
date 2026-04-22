@@ -100,6 +100,10 @@ export const updateTradingPreferenceResponseSchema = z.object({
 });
 export type UpdateTradingPreferenceResponse = z.infer<typeof updateTradingPreferenceResponseSchema>;
 
+export const RUNTIME_MIDPOINT_REFERENCE_PRICE_SOURCE = 'clob-midpoint-reference';
+export const runtimeMarketPriceSourceSchema = z.enum([RUNTIME_MIDPOINT_REFERENCE_PRICE_SOURCE]);
+export type RuntimeMarketPriceSource = z.infer<typeof runtimeMarketPriceSourceSchema>;
+
 export const runtimeMarketSchema = z.object({
   id: z.string(),
   eventId: z.string(),
@@ -112,6 +116,7 @@ export const runtimeMarketSchema = z.object({
   noTokenId: z.string().nullable(),
   yesPrice: z.number().nullable(),
   noPrice: z.number().nullable(),
+  priceSource: runtimeMarketPriceSourceSchema.optional(),
   spread: z.number().nullable(),
   volume24hr: z.number().nullable(),
   liquidity: z.number().nullable(),
@@ -129,6 +134,7 @@ export const strategyCandidateSchema = z.object({
   question: z.string(),
   yesPrice: z.number().nullable(),
   noPrice: z.number().nullable(),
+  priceSource: runtimeMarketPriceSourceSchema.optional(),
   spread: z.number().nullable(),
   liquidity: z.number().nullable(),
   volume24hr: z.number().nullable(),
@@ -273,6 +279,7 @@ export const paperPositionSummarySchema = z.object({
   quantity: z.number().nonnegative(),
   averageEntryPrice: z.number().min(0).max(1),
   markPrice: z.number().min(0).max(1).nullable(),
+  markPriceSource: runtimeMarketPriceSourceSchema.optional(),
   unrealizedPnlUsd: z.number().nullable(),
   openedAt: z.string(),
   status: z.enum(['open', 'closed']),
@@ -331,6 +338,7 @@ export const runtimeTradeSummarySchema = z.object({
   positionQuantity: z.number().nonnegative(),
   averageEntryPrice: z.number().min(0).max(1).nullable(),
   markPrice: z.number().min(0).max(1).nullable(),
+  markPriceSource: runtimeMarketPriceSourceSchema.optional(),
   realizedPnlUsd: z.number().nullable(),
   unrealizedPnlUsd: z.number().nullable(),
   openedAt: z.string().nullable(),

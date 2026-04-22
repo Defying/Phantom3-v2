@@ -155,6 +155,7 @@ Reference files:
 - milestone definition: `docs/milestones/PAPER_SAFE_STRATEGY_MILESTONE.md`
 - trading-preference rule reference: `docs/architecture/TRADING_PREFERENCE_PROFILES.md`
 - canonical crypto-window parity target: `docs/architecture/CRYPTO_WINDOW_PARITY_SPEC.md`
+- Polymarket live adapter integration map: `docs/architecture/POLYMARKET_LIVE_ADAPTER_INTEGRATION_SURFACES.md`
 - QA checklist: `docs/qa/PAPER_SAFE_STRATEGY_CHECKLIST.md`
 - Mullvad static checklist: `docs/qa/MULLVAD_SOCKS5_STATIC_CHECKLIST.md`
 - operator runbook and warnings: `docs/runbooks/PAPER_SAFE_OPERATOR_RUNBOOK.md`

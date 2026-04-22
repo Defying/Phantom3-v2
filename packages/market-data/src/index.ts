@@ -1,4 +1,7 @@
-import type { RuntimeMarket } from '../../contracts/src/index.js'
+import {
+  RUNTIME_MIDPOINT_REFERENCE_PRICE_SOURCE,
+  type RuntimeMarket
+} from '../../contracts/src/index.js'
 import { OutboundTransport } from '../../transport/src/index.js'
 import {
   discoverCryptoWindowMarkets,
@@ -36,7 +39,7 @@ export type PolymarketAccessSummary = {
   note: string
 }
 
-type MidpointResponse = {
+type MidpointReferenceResponse = {
   mid?: string | number | null
 }
 
@@ -116,9 +119,9 @@ async function getJson<T>(url: string, signal: AbortSignal, transport: OutboundT
   })
 }
 
-async function fetchMidpoint(tokenId: string, signal: AbortSignal, transport: OutboundTransport): Promise<number | null> {
+async function fetchMidpointReference(tokenId: string, signal: AbortSignal, transport: OutboundTransport): Promise<number | null> {
   try {
-    const payload = await getJson<MidpointResponse>(`${CLOB_API_BASE}/midpoint?token_id=${tokenId}`, signal, transport)
+    const payload = await getJson<MidpointReferenceResponse>(`${CLOB_API_BASE}/midpoint?token_id=${tokenId}`, signal, transport)
     return asNumber(payload.mid)
   } catch {
     return null
@@ -134,8 +137,8 @@ async function hydrateSelectedMarkets(
     const yesTokenId = entry.market.yesTokenId
     const noTokenId = entry.market.noTokenId
     const [yesPrice, noPrice] = await Promise.all([
-      yesTokenId ? fetchMidpoint(yesTokenId, signal, transport) : Promise.resolve(null),
-      noTokenId ? fetchMidpoint(noTokenId, signal, transport) : Promise.resolve(null)
+      yesTokenId ? fetchMidpointReference(yesTokenId, signal, transport) : Promise.resolve(null),
+      noTokenId ? fetchMidpointReference(noTokenId, signal, transport) : Promise.resolve(null)
     ])
 
     return {
@@ -143,7 +146,8 @@ async function hydrateSelectedMarkets(
       market: {
         ...entry.market,
         yesPrice,
-        noPrice
+        noPrice,
+        priceSource: RUNTIME_MIDPOINT_REFERENCE_PRICE_SOURCE
       }
     }
   }))

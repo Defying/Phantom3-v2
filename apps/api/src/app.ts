@@ -10,7 +10,7 @@ import { RuntimeStore } from './runtime-store.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-export const TRADING_PREFERENCE_ACCESS_NOTE = 'Read endpoints are open. Paper strategy routes are sanitized and read-only. Control routes require a token. Trading preference selection now routes through a paper-safe profile abstraction: current-v2-generic can emit new paper entries, while legacy profiles stay reference-only. The legacy early-exit live profile also keeps managed exits and session guards active for existing paper positions. Polymarket transport, if configured, is scoped to the market-data adapter only.';
+export const TRADING_PREFERENCE_ACCESS_NOTE = 'Read endpoints are open. Paper strategy routes are sanitized and read-only. Control routes require a token. Trading preference selection now routes through a paper-safe profile abstraction: current-v2-generic can emit new paper entries, while legacy profiles stay reference-only. The legacy early-exit live profile also keeps managed exits and session guards active for existing paper positions. `/api/control/flatten` only works on paper positions in this bootstrap, and `/api/control/live/*` stays scaffold-only until a real live adapter and startup reconciliation path are wired. Polymarket transport, if configured, is scoped to the market-data adapter only.';
 
 export type CreateApiAppOptions = {
   logger?: boolean;

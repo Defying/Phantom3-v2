@@ -36,3 +36,4 @@ Use these docs together:
 
 The first live-capital spec is documented separately and remains **planned, not implemented**:
 - `docs/architecture/MILESTONE_3_LIVE_TRADING_THIN_SLICE.md`
+- `docs/architecture/POLYMARKET_LIVE_ADAPTER_INTEGRATION_SURFACES.md`

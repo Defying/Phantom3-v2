@@ -157,7 +157,7 @@ export function evaluatePaperTradeRisk(input: PaperRiskEvaluationInput): PaperRi
   const openMarketCount = countOpenMarkets(positions);
   const remainingMarketCapacityUsd = Math.max(0, config.perMarketExposureCapUsd - currentMarketExposureUsd);
   const remainingTotalCapacityUsd = Math.max(0, config.totalExposureCapUsd - currentTotalExposureUsd);
-  const referenceEntryPrice = resolveReferenceEntryPrice(parsed.market);
+  const referenceEntryPrice = resolveExecutableReferencePrice(parsed.market, parsed.intent.reduceOnly);
   const spreadBps = computeSpreadBps(parsed.market);
   const marketFreshnessMs = computeEffectiveFreshnessMs(parsed.market, nowMs);
   const liquiditySizeLimitUsd =
@@ -487,8 +487,12 @@ function getHardRejectReasons(options: {
   }
 
   if (referenceEntryPrice == null) {
-    reasons.push(buildReason('missing_price_quote', 'Market snapshot is missing a usable best-ask or midpoint quote.'));
-  } else if (intent.maxEntryPrice != null && referenceEntryPrice - intent.maxEntryPrice > EPSILON) {
+    reasons.push(
+      intent.reduceOnly
+        ? buildReason('missing_executable_exit_quote', 'Market snapshot is missing a usable executable best-bid quote. Midpoint remains reference-only.')
+        : buildReason('missing_executable_entry_quote', 'Market snapshot is missing a usable executable best-ask quote. Midpoint remains reference-only.')
+    );
+  } else if (!intent.reduceOnly && intent.maxEntryPrice != null && referenceEntryPrice - intent.maxEntryPrice > EPSILON) {
     reasons.push(
       buildReason('entry_price_above_limit', 'Reference entry price is above the intent limit price.', {
         referenceEntryPrice: roundPrice(referenceEntryPrice),
@@ -602,28 +606,19 @@ function countOpenMarkets(positions: PositionSnapshot[]): number {
   return openMarkets.size;
 }
 
-function resolveReferenceEntryPrice(market: RiskMarketSnapshot): number | null {
-  if (market.bestAsk != null) {
-    return market.bestAsk;
-  }
-  if (market.midpoint != null) {
-    return market.midpoint;
-  }
-  if (market.bestBid != null && market.bestAsk != null) {
-    return (market.bestBid + market.bestAsk) / 2;
-  }
-  return null;
+function resolveExecutableReferencePrice(market: RiskMarketSnapshot, reduceOnly: boolean): number | null {
+  return reduceOnly ? market.bestBid ?? null : market.bestAsk ?? null;
 }
 
 function computeSpreadBps(market: RiskMarketSnapshot): number | null {
   if (market.bestBid == null || market.bestAsk == null || market.bestAsk < market.bestBid) {
     return null;
   }
-  const midpoint = market.midpoint ?? (market.bestBid + market.bestAsk) / 2;
-  if (midpoint <= 0) {
+  const executableMidpoint = (market.bestBid + market.bestAsk) / 2;
+  if (executableMidpoint <= 0) {
     return null;
   }
-  return ((market.bestAsk - market.bestBid) / midpoint) * 10_000;
+  return ((market.bestAsk - market.bestBid) / executableMidpoint) * 10_000;
 }
 
 function computeEffectiveFreshnessMs(market: RiskMarketSnapshot, nowMs: number): number | null {

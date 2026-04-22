@@ -298,14 +298,14 @@ function buildLiveControlSummary(live: RuntimeLiveControl): string {
   }
 
   if (!live.armable) {
-    return 'Live mode was requested in config, but process-level arming is disabled. No live adapter is installed, so venue writes stay blocked.';
+    return 'Live mode was requested in config, but process-level arming is disabled. No live adapter or reduce-only live flatten path is installed, so venue writes stay blocked.';
   }
 
   if (live.armed) {
     return 'Live control plane is armed at the operator layer, but no live adapter is installed yet, so venue writes remain blocked.';
   }
 
-  return 'Live control plane is configured but disarmed. Paper execution remains authoritative until a live adapter exists.';
+  return 'Live control plane is configured but still scaffold-only. Arming and live flatten stay unavailable until a live adapter and boot reconciliation exist.';
 }
 
 function createInitialLiveControl(config: AppConfig): RuntimeLiveControl {
@@ -316,7 +316,7 @@ function createInitialLiveControl(config: AppConfig): RuntimeLiveControl {
     liveAdapterReady: false,
     killSwitchActive: false,
     killSwitchReason: null,
-    flattenSupported: true,
+    flattenSupported: false,
     lastOperatorAction: null,
     lastOperatorActionAt: null,
     summary: ''
@@ -606,6 +606,9 @@ if (reloadedPersistedState) {
     }
     if (live.killSwitchActive) {
       throw new Error('Cannot arm the live control plane while the kill switch is active.');
+    }
+    if (!live.liveAdapterReady) {
+      throw new Error('Cannot arm live control yet: no live adapter or startup reconciliation path is installed in this bootstrap.');
     }
     if (live.armed) {
       return { ok: true, armed: true, changed: false };
@@ -1254,7 +1257,7 @@ if (reloadedPersistedState) {
       ...next,
       armed: next.killSwitchActive ? false : next.armed,
       liveAdapterReady: false,
-      flattenSupported: true,
+      flattenSupported: false,
       summary: ''
     } satisfies RuntimeLiveControl;
 

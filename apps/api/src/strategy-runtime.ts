@@ -1,15 +1,16 @@
-import type {
-  PaperIntentSummary,
-  PaperPositionSummary,
-  PaperStrategyView,
-  RiskDecisionSummary,
-  RuntimeMarket,
-  RuntimeState,
-  StrategyCandidate,
-  StrategyRoutingSummary,
-  StrategyRuntimeStatus,
-  StrategyRuntimeSummary,
-  StrategyStateSnapshot
+import {
+  RUNTIME_MIDPOINT_REFERENCE_PRICE_SOURCE,
+  type PaperIntentSummary,
+  type PaperPositionSummary,
+  type PaperStrategyView,
+  type RiskDecisionSummary,
+  type RuntimeMarket,
+  type RuntimeState,
+  type StrategyCandidate,
+  type StrategyRoutingSummary,
+  type StrategyRuntimeStatus,
+  type StrategyRuntimeSummary,
+  type StrategyStateSnapshot
 } from '../../../packages/contracts/src/index.js';
 import type { ProjectedPosition } from '../../../packages/ledger/src/index.js';
 import type { PaperQuote } from '../../../packages/paper-execution/src/index.js';
@@ -52,8 +53,12 @@ function compactUsd(value: number): string {
   return `$${round(value, 0)}`;
 }
 
-function sidePrice(market: RuntimeMarket, side: 'yes' | 'no'): number | null {
+function sideMidpointReferencePrice(market: RuntimeMarket, side: 'yes' | 'no'): number | null {
   return side === 'yes' ? market.yesPrice : market.noPrice;
+}
+
+function marketPriceSource(market: RuntimeMarket | null): RuntimeMarket['priceSource'] {
+  return market?.priceSource ?? RUNTIME_MIDPOINT_REFERENCE_PRICE_SOURCE;
 }
 
 function sideTokenId(market: RuntimeMarket, side: 'yes' | 'no'): string | null {
@@ -91,6 +96,7 @@ function toStrategyCandidate(signal: EvaluatedMarketSignal): StrategyCandidate {
     question: signal.market.question,
     yesPrice: signal.market.yesPrice,
     noPrice: signal.market.noPrice,
+    priceSource: signal.market.priceSource,
     spread: signal.market.spread,
     liquidity: signal.market.liquidity,
     volume24hr: signal.market.volume24hr,
@@ -220,10 +226,10 @@ export function createPaperPositionSummary(
   }
 
   const inferredSide = market ? inferSideFromToken(market, position.tokenId) : 'yes';
-  const markPrice = market ? sidePrice(market, inferredSide) : null;
-  const unrealizedPnlUsd = markPrice == null
+  const referenceMarkPrice = market ? sideMidpointReferencePrice(market, inferredSide) : null;
+  const unrealizedPnlUsd = referenceMarkPrice == null
     ? null
-    : round((markPrice - position.averageEntryPrice) * position.netQuantity, 2);
+    : round((referenceMarkPrice - position.averageEntryPrice) * position.netQuantity, 2);
 
   return {
     id: position.positionId,
@@ -233,7 +239,8 @@ export function createPaperPositionSummary(
     side: inferredSide,
     quantity: round(position.netQuantity, 6),
     averageEntryPrice: round(position.averageEntryPrice),
-    markPrice: markPrice == null ? null : round(markPrice),
+    markPrice: referenceMarkPrice == null ? null : round(referenceMarkPrice),
+    markPriceSource: referenceMarkPrice == null ? undefined : marketPriceSource(market),
     unrealizedPnlUsd,
     openedAt: position.openedAt ?? position.updatedAt ?? new Date().toISOString(),
     status: 'open',
@@ -252,22 +259,17 @@ export function createRiskPositionSnapshot(summary: PaperPositionSummary): Posit
   };
 }
 
-function marketBookPrices(market: RuntimeMarket, side: 'yes' | 'no'): { midpoint: number | null; bestBid: number | null; bestAsk: number | null } {
-  const midpoint = sidePrice(market, side);
-  if (midpoint == null) {
-    return { midpoint: null, bestBid: null, bestAsk: null };
-  }
-
-  const halfSpread = Math.max(0, (market.spread ?? 0) / 2);
+function marketReferenceQuote(market: RuntimeMarket, side: 'yes' | 'no'): { midpoint: number | null; bestBid: null; bestAsk: null } {
+  const midpoint = sideMidpointReferencePrice(market, side);
   return {
-    midpoint,
-    bestBid: round(clamp(midpoint - halfSpread, 0.001, 0.999)),
-    bestAsk: round(clamp(midpoint + halfSpread, 0.001, 0.999))
+    midpoint: midpoint == null ? null : round(midpoint),
+    bestBid: null,
+    bestAsk: null
   };
 }
 
 export function createRiskMarketSnapshot(market: RuntimeMarket, side: 'yes' | 'no', observedAt: string): RiskMarketSnapshot {
-  const prices = marketBookPrices(market, side);
+  const prices = marketReferenceQuote(market, side);
 
   return {
     marketId: market.id,
@@ -284,7 +286,7 @@ export function createRiskMarketSnapshot(market: RuntimeMarket, side: 'yes' | 'n
 }
 
 export function createPaperQuote(market: RuntimeMarket, side: 'yes' | 'no', observedAt: string): PaperQuote | null {
-  const prices = marketBookPrices(market, side);
+  const prices = marketReferenceQuote(market, side);
   const tokenId = sideTokenId(market, side) ?? `${market.id}:${side}`;
   if (prices.midpoint == null) {
     return null;
@@ -298,7 +300,12 @@ export function createPaperQuote(market: RuntimeMarket, side: 'yes' | 'no', obse
     bestBid: prices.bestBid,
     bestAsk: prices.bestAsk,
     midpoint: prices.midpoint,
-    source: 'market-snapshot'
+    source: RUNTIME_MIDPOINT_REFERENCE_PRICE_SOURCE,
+    metadata: {
+      referenceOnly: true,
+      executableBook: false,
+      priceSource: marketPriceSource(market)
+    }
   };
 }
 
