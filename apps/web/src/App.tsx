@@ -1,54 +1,119 @@
 import { useEffect, useMemo, useState } from 'react';
-import type {
-  PaperIntentSummary,
-  PaperPositionSummary,
-  RiskDecisionSummary,
-  RuntimeState,
-  StrategyCandidate
-} from '../../../packages/contracts/src/index';
-import {
-  buildControlHeaders,
-  deriveDashboardFreshness,
-  liveControlBadge,
-  moduleBadge,
-  watchEntryBadge,
-  type DashboardFreshness
-} from './dashboard-helpers';
+import type { ModuleStatus, RuntimeState } from '../../../packages/contracts/src/index';
 
-const tokenStorageKey = 'phantom3-v2-control-token';
-const tokenCookieKey = 'phantom3-v2-control-token';
-
-const compactUsdFormatter = new Intl.NumberFormat('en-US', {
-  style: 'currency',
-  currency: 'USD',
-  notation: 'compact',
-  maximumFractionDigits: 1
-});
-const usdFormatter = new Intl.NumberFormat('en-US', {
-  style: 'currency',
-  currency: 'USD',
-  maximumFractionDigits: 2
-});
+const tokenStorageKey = 'wraith-control-token';
 const compactNumber = new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 1 });
-const integerFormatter = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 });
 
-type SocketState = 'connecting' | 'live' | 'reconnecting' | 'offline' | 'stale';
-type Tone = 'healthy' | 'warning' | 'idle' | 'blocked' | 'info' | 'long' | 'short';
-type TradingPreferenceOption = RuntimeState['tradingPreference']['selected'];
-type StrategyRouting = NonNullable<RuntimeState['strategy']['routing']>;
+const candidateIntentPaths = [
+  'candidateIntents',
+  'strategy.candidateIntents',
+  'strategy.intents',
+  'strategy.pipeline.candidateIntents'
+] as const;
 
-type RuntimeEnvelope = { type: 'runtime'; data: RuntimeState } | { type: 'pong'; at: string };
+const riskDecisionPaths = [
+  'riskDecisions',
+  'risk.decisions',
+  'strategy.riskDecisions',
+  'strategy.pipeline.riskDecisions'
+] as const;
 
-async function fetchRuntime(token: string): Promise<RuntimeState> {
-  const response = await fetch('/api/runtime', {
-    headers: buildControlHeaders(token)
-  });
+const paperPositionPaths = [
+  'paperPositions',
+  'positions',
+  'paper.positions',
+  'paperLedger.positions',
+  'ledger.positions'
+] as const;
+
+type SocketState = 'connecting' | 'live' | 'reconnecting' | 'offline';
+type Tone = ModuleStatus | 'info';
+type ControlPath =
+  | '/api/control/pause'
+  | '/api/control/resume'
+  | '/api/control/live/arm'
+  | '/api/control/live/disarm'
+  | '/api/control/flatten'
+  | '/api/control/kill-switch/engage'
+  | '/api/control/kill-switch/release';
+type LooseRecord = Record<string, unknown>;
+
+type RuntimeEnvelope = {
+  type: 'runtime';
+  data: RuntimeState;
+};
+
+type DetailField = {
+  label: string;
+  value: string;
+};
+
+type DetailCard = {
+  id: string;
+  title: string;
+  subtitle?: string;
+  badge: string;
+  tone: Tone;
+  fields: DetailField[];
+};
+
+type StrategyPanel = {
+  heading: string;
+  summary: string;
+  badge: string;
+  tone: Tone;
+  fields: DetailField[];
+};
+
+type DetailSectionProps = {
+  eyebrow: string;
+  title: string;
+  subtitle: string;
+  emptyState: string;
+  items: DetailCard[];
+};
+
+type UpDownDecision = 'CANDIDATE' | 'WATCH' | 'SKIP';
+
+type UpDownScanRow = {
+  decision: UpDownDecision;
+  blockers: string[];
+  asset: 'BTC' | 'ETH' | 'SOL';
+  window: '5m' | '15m';
+  minutesToEnd: number;
+  side: 'Up' | 'Down';
+  sidePrice: number | null;
+  yes: number | null;
+  no: number | null;
+  coinbaseOpen: number;
+  coinbaseCurrent: number;
+  moveBps: number;
+  spread: number | null;
+  liquidity: number | null;
+  volume24hr: number | null;
+  question: string;
+  slug: string;
+  url: string;
+};
+
+type UpDownScanResult = {
+  scannedAt: string;
+  note: string;
+  rows: UpDownScanRow[];
+};
+
+async function fetchRuntime(): Promise<RuntimeState> {
+  const response = await fetch('/api/runtime');
   if (!response.ok) {
-    if (response.status === 401) {
-      throw new Error('Control token required to load runtime data.');
-    }
-    const payload = await response.json().catch(() => ({} as { error?: string }));
-    throw new Error(payload.error || 'Failed to fetch runtime');
+    throw new Error('Failed to fetch runtime');
+  }
+  return response.json();
+}
+
+async function fetchUpDownScan(): Promise<UpDownScanResult> {
+  const response = await fetch('/api/updown-scan');
+  if (!response.ok) {
+    throw new Error('Failed to scan Up/Down markets');
   }
   return response.json();
 }
@@ -58,967 +123,463 @@ function websocketUrl(): string {
   return `${protocol}//${window.location.host}/api/ws`;
 }
 
-function readSessionToken(): string {
-  if (typeof window === 'undefined') return '';
-  try {
-    return window.sessionStorage.getItem(tokenStorageKey) ?? '';
-  } catch {
+function formatPercent(value: number | null): string {
+  return value === null ? '...' : `${(value * 100).toFixed(1)}%`;
+}
+
+function formatMaybeMoney(value: number | null): string {
+  return value === null ? '...' : compactNumber.format(value);
+}
+
+function defined<T>(value: T | null | undefined): value is T {
+  return value !== null && value !== undefined;
+}
+
+function asRecord(value: unknown): LooseRecord | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? (value as LooseRecord) : null;
+}
+
+function asRecordArray(value: unknown): LooseRecord[] {
+  return Array.isArray(value)
+    ? value.map((entry) => asRecord(entry)).filter(defined)
+    : [];
+}
+
+function resolvePath(source: unknown, path: string): unknown {
+  return path.split('.').reduce<unknown>((current, segment) => {
+    const record = asRecord(current);
+    return record ? record[segment] : undefined;
+  }, source);
+}
+
+function firstPresent(source: unknown, paths: readonly string[]): unknown {
+  for (const path of paths) {
+    const value = resolvePath(source, path);
+    if (value !== undefined && value !== null) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+function readString(source: unknown, paths: readonly string[]): string | null {
+  const value = firstPresent(source, paths);
+  return typeof value === 'string' && value.trim().length ? value : null;
+}
+
+function readNumber(source: unknown, paths: readonly string[]): number | null {
+  const value = firstPresent(source, paths);
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function readStringArray(source: unknown, paths: readonly string[]): string[] {
+  const value = firstPresent(source, paths);
+  return Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0)
+    : [];
+}
+
+function isDateLike(value: string): boolean {
+  return value.includes('T') && !Number.isNaN(Date.parse(value));
+}
+
+function humanizeKey(value: string): string {
+  return value
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^./, (char) => char.toUpperCase());
+}
+
+function formatNumber(value: number): string {
+  if (Math.abs(value) >= 1000) {
+    return compactNumber.format(value);
+  }
+  if (Number.isInteger(value)) {
+    return value.toString();
+  }
+  const digits = Math.abs(value) >= 1 ? 2 : 4;
+  return value.toFixed(digits).replace(/\.0+$/, '').replace(/(\.\d*?)0+$/, '$1');
+}
+
+function formatMoney(value: unknown): string {
+  const amount = typeof value === 'number' && Number.isFinite(value) ? value : null;
+  if (amount === null) {
+    return formatValue(value);
+  }
+  const prefix = amount < 0 ? '-$' : '$';
+  return `${prefix}${formatNumber(Math.abs(amount))}`;
+}
+
+function formatRatio(value: unknown): string {
+  const amount = typeof value === 'number' && Number.isFinite(value) ? value : null;
+  if (amount === null) {
+    return formatValue(value);
+  }
+  if (amount >= 0 && amount <= 1) {
+    return formatPercent(amount);
+  }
+  return formatNumber(amount);
+}
+
+function formatValue(value: unknown): string {
+  if (value === null || value === undefined) {
     return '';
   }
-}
-
-function writeSessionToken(token: string): void {
-  if (typeof window === 'undefined') return;
-  try {
-    if (token) {
-      window.sessionStorage.setItem(tokenStorageKey, token);
-    } else {
-      window.sessionStorage.removeItem(tokenStorageKey);
-    }
-  } catch {
-    // Ignore browser storage failures and keep the in-memory copy.
+  if (typeof value === 'number') {
+    return formatNumber(value);
   }
-}
-
-function clearLegacyTokenStorage(): void {
-  if (typeof window === 'undefined') return;
-  try {
-    window.localStorage.removeItem(tokenStorageKey);
-  } catch {
-    // Ignore browser storage failures.
+  if (typeof value === 'boolean') {
+    return value ? 'yes' : 'no';
   }
-}
-
-function syncTokenCookie(token: string): void {
-  if (typeof document === 'undefined') return;
-  const secure = window.location.protocol === 'https:' ? '; Secure' : '';
-  const trimmed = token.trim();
-
-  if (trimmed.length === 0) {
-    document.cookie = `${tokenCookieKey}=; Path=/; Max-Age=0; SameSite=Strict${secure}`;
-    return;
+  if (typeof value === 'string') {
+    return isDateLike(value) ? new Date(value).toLocaleString() : value;
   }
-
-  document.cookie = `${tokenCookieKey}=${encodeURIComponent(trimmed)}; Path=/; SameSite=Strict${secure}`;
+  if (Array.isArray(value)) {
+    const flattened = value.map((entry) => formatValue(entry)).filter(Boolean);
+    return flattened.join(', ');
+  }
+  const record = asRecord(value);
+  if (record) {
+    const preview = Object.entries(record)
+      .slice(0, 3)
+      .map(([key, entry]) => `${humanizeKey(key)}: ${formatValue(entry)}`)
+      .join(' · ');
+    return preview;
+  }
+  return String(value);
 }
 
-function formatPercent(value: number | null | undefined, digits = 1): string {
-  if (value === null || value === undefined || !Number.isFinite(value)) return '—';
-  return `${(value * 100).toFixed(digits)}%`;
+function maybeField(
+  label: string,
+  value: unknown,
+  formatter: (entry: unknown) => string = formatValue
+): DetailField | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  const formatted = formatter(value);
+  return formatted ? { label, value: formatted } : null;
 }
 
-function formatUsd(value: number | null | undefined): string {
-  if (value === null || value === undefined || !Number.isFinite(value)) return '—';
-  if (Math.abs(value) >= 10_000) return compactUsdFormatter.format(value);
-  return usdFormatter.format(value);
-}
-
-function formatSignedUsd(value: number | null | undefined): string {
-  if (value === null || value === undefined || !Number.isFinite(value)) return '—';
-  const prefix = value > 0 ? '+' : '';
-  return `${prefix}${formatUsd(value)}`;
-}
-
-function formatCompactNumber(value: number | null | undefined): string {
-  if (value === null || value === undefined || !Number.isFinite(value)) return '—';
-  if (Math.abs(value) >= 1000) return compactNumber.format(value);
-  if (Number.isInteger(value)) return integerFormatter.format(value);
-  return value.toFixed(Math.abs(value) < 1 ? 3 : 2).replace(/\.?0+$/, '');
-}
-
-function formatInteger(value: number | null | undefined): string {
-  if (value === null || value === undefined || !Number.isFinite(value)) return '—';
-  return integerFormatter.format(Math.round(value));
-}
-
-function formatRelative(iso: string | null | undefined): string {
-  if (!iso) return '—';
-  const then = Date.parse(iso);
-  if (!Number.isFinite(then)) return '—';
-  const delta = Date.now() - then;
-  const absSec = Math.abs(delta) / 1000;
-  const suffix = delta >= 0 ? 'ago' : 'from now';
-  if (absSec < 5) return 'just now';
-  if (absSec < 60) return `${Math.round(absSec)}s ${suffix}`;
-  if (absSec < 3600) return `${Math.round(absSec / 60)}m ${suffix}`;
-  if (absSec < 86_400) return `${Math.round(absSec / 3600)}h ${suffix}`;
-  return `${Math.round(absSec / 86_400)}d ${suffix}`;
-}
-
-function formatAbsoluteTime(iso: string | null | undefined): string {
-  if (!iso) return '';
-  const then = Date.parse(iso);
-  if (!Number.isFinite(then)) return '';
-  return new Date(then).toLocaleString();
-}
-
-function pnlTone(value: number | null | undefined): Tone {
-  if (value === null || value === undefined || !Number.isFinite(value)) return 'idle';
-  if (value > 0) return 'long';
-  if (value < 0) return 'short';
+function toneFromValue(value: string | null | undefined): Tone {
+  if (!value) {
+    return 'idle';
+  }
+  const normalized = value.toLowerCase();
+  if (['healthy', 'live', 'running', 'active', 'open', 'approve', 'approved'].some((needle) => normalized.includes(needle))) {
+    return 'healthy';
+  }
+  if (['warning', 'stale', 'degraded', 'resize', 'paused', 'pending', 'review'].some((needle) => normalized.includes(needle))) {
+    return 'warning';
+  }
+  if (['blocked', 'error', 'reject', 'rejected', 'closed', 'flat', 'disabled', 'halted'].some((needle) => normalized.includes(needle))) {
+    return 'blocked';
+  }
+  if (['buy', 'sell', 'yes', 'no', 'long', 'short'].some((needle) => normalized.includes(needle))) {
+    return 'info';
+  }
   return 'idle';
 }
 
-function decisionTone(decision: RiskDecisionSummary['decision']): Tone {
-  if (decision === 'approve') return 'long';
-  if (decision === 'reject' || decision === 'block') return 'short';
-  if (decision === 'resize') return 'warning';
-  return 'idle';
+function buildSubtitle(parts: Array<string | null | undefined>): string | undefined {
+  const values = parts.filter((part): part is string => Boolean(part && part.trim().length));
+  return values.length ? values.join(' · ') : undefined;
 }
 
-function intentStatusTone(status: PaperIntentSummary['status']): Tone {
-  if (status === 'submitted') return 'long';
-  if (status === 'closed') return 'idle';
-  if (status === 'watching') return 'warning';
-  return 'info';
+function extractArray(source: unknown, paths: readonly string[]): LooseRecord[] {
+  return asRecordArray(firstPresent(source, paths));
 }
 
-function strategyStatusTone(status: string): Tone {
-  if (status === 'observing') return 'long';
-  if (status === 'paused') return 'warning';
-  if (status === 'degraded') return 'short';
-  return 'idle';
+function extractStrategyPanel(runtime: RuntimeState | null): StrategyPanel {
+  if (!runtime) {
+    return {
+      heading: 'Loading strategy state',
+      summary: 'Waiting for the runtime payload.',
+      badge: 'loading',
+      tone: 'idle',
+      fields: []
+    };
+  }
+
+  const strategyModule = runtime.modules.find((module) => module.id === 'strategy');
+  const source =
+    asRecord(firstPresent(runtime, ['strategyStatus', 'strategy', 'strategyEngine', 'strategyState'])) ??
+    strategyModule ??
+    null;
+
+  const status =
+    readString(source, ['status', 'state', 'phase', 'mode']) ??
+    strategyModule?.status ??
+    (runtime.paused ? 'paused' : 'observer');
+
+  const fields = [
+    maybeField('Version', readString(source, ['strategyVersion', 'version'])),
+    maybeField('Phase', readString(source, ['phase', 'state', 'mode'])),
+    maybeField('Last update', firstPresent(source, ['updatedAt', 'lastUpdatedAt', 'lastEvaluatedAt', 'lastIntentAt'])),
+    maybeField('Market', readString(source, ['marketId', 'activeMarketId', 'symbol']))
+  ].filter(defined);
+
+  return {
+    heading: readString(source, ['name', 'label']) ?? strategyModule?.name ?? 'Strategy Engine',
+    summary:
+      readString(source, ['summary', 'message', 'note']) ??
+      strategyModule?.summary ??
+      'Strategy payload will appear here when the engine starts publishing state.',
+    badge: status,
+    tone: toneFromValue(status),
+    fields
+  };
 }
 
-function tradingPreferenceTone(option: TradingPreferenceOption): Tone {
-  return option.parityStatus === 'current-runtime' ? 'long' : 'warning';
+function buildCandidateIntentCards(runtime: RuntimeState | null): DetailCard[] {
+  return extractArray(runtime, candidateIntentPaths).slice(0, 6).map((entry, index) => {
+    const question = readString(entry, ['question', 'marketQuestion', 'marketTitle', 'label']);
+    const thesis = readString(entry, ['thesis', 'summary', 'note']);
+    const status = readString(entry, ['status', 'state']);
+    const side = readString(entry, ['side']);
+    const badge = side ?? status ?? 'candidate';
+
+    return {
+      id: readString(entry, ['intentId', 'id']) ?? `candidate-${index}`,
+      title: question ?? thesis ?? `Candidate intent ${index + 1}`,
+      subtitle:
+        (thesis && thesis !== question ? thesis : null) ??
+        buildSubtitle([
+          readString(entry, ['marketId', 'slug']),
+          readString(entry, ['tokenId'])
+        ]),
+      badge,
+      tone: status ? toneFromValue(status) : toneFromValue(side),
+      fields: [
+        maybeField('Intent', readString(entry, ['intentId', 'id'])),
+        maybeField('Market', readString(entry, ['marketId', 'slug'])),
+        maybeField('Token', readString(entry, ['tokenId'])),
+        maybeField('Confidence', firstPresent(entry, ['confidence', 'score', 'probability']), formatRatio),
+        maybeField('Target USD', firstPresent(entry, ['desiredSizeUsd', 'sizeUsd', 'notionalUsd']), formatMoney),
+        maybeField('Target size', firstPresent(entry, ['size', 'requestedSize']), formatValue),
+        maybeField('Max entry', firstPresent(entry, ['maxEntryPrice', 'entryPrice', 'limitPrice']), formatValue),
+        maybeField('Created', firstPresent(entry, ['createdAt', 'at']))
+      ].filter(defined)
+    };
+  });
 }
 
-function strategyRoutingTone(routing: StrategyRouting | null | undefined): Tone {
-  return routing?.executionMode === 'paper-active' ? 'long' : 'warning';
+function buildRiskDecisionCards(runtime: RuntimeState | null): DetailCard[] {
+  return extractArray(runtime, riskDecisionPaths).slice(0, 6).map((entry, index) => {
+    const reasons = readStringArray(entry, ['reasons']);
+    const decision = readString(entry, ['decision', 'status']) ?? 'pending';
+    const question = readString(entry, ['question', 'marketQuestion', 'marketTitle']);
+    const intentId = readString(entry, ['intentId']);
+
+    return {
+      id: readString(entry, ['id', 'intentId']) ?? `risk-${index}`,
+      title: question ?? (intentId ? `Intent ${intentId}` : `Risk decision ${index + 1}`),
+      subtitle: reasons.length ? reasons.join(' · ') : buildSubtitle([readString(entry, ['marketId']), readString(entry, ['note', 'message'])]),
+      badge: decision,
+      tone: toneFromValue(decision),
+      fields: [
+        maybeField('Intent', intentId),
+        maybeField('Market', readString(entry, ['marketId'])),
+        maybeField('Approved USD', firstPresent(entry, ['approvedSizeUsd', 'sizeUsd']), formatMoney),
+        maybeField('Approved size', firstPresent(entry, ['size']), formatValue),
+        maybeField('Created', firstPresent(entry, ['createdAt', 'at']))
+      ].filter(defined)
+    };
+  });
 }
 
-function strategyEntryPolicyTone(routing: StrategyRouting | null | undefined): Tone {
-  return routing?.entryPolicy === 'emit-new-entries' ? 'long' : 'warning';
+function buildPaperPositionCards(runtime: RuntimeState | null): DetailCard[] {
+  return extractArray(runtime, paperPositionPaths).slice(0, 6).map((entry, index) => {
+    const question = readString(entry, ['question', 'marketQuestion', 'marketTitle', 'label']);
+    const status = readString(entry, ['status']) ?? (readNumber(entry, ['remainingSize']) ? 'open' : 'flat');
+    const side = readString(entry, ['side']);
+
+    return {
+      id: readString(entry, ['lotId', 'positionId', 'id']) ?? `position-${index}`,
+      title: question ?? readString(entry, ['marketId', 'slug']) ?? `Paper position ${index + 1}`,
+      subtitle: buildSubtitle([
+        side,
+        readString(entry, ['tokenId']),
+        readString(entry, ['lotId', 'positionId'])
+      ]),
+      badge: status,
+      tone: toneFromValue(status),
+      fields: [
+        maybeField('Remaining size', firstPresent(entry, ['remainingSize', 'size', 'quantity']), formatValue),
+        maybeField('Avg entry', firstPresent(entry, ['averageEntryPrice', 'entryPrice']), formatValue),
+        maybeField('Realized P&L', firstPresent(entry, ['realizedPnl']), formatMoney),
+        maybeField('Mark', firstPresent(entry, ['unrealizedMark', 'markPrice', 'mark']), formatValue),
+        maybeField('Updated', firstPresent(entry, ['updatedAt', 'closedAt', 'openedAt', 'createdAt']))
+      ].filter(defined)
+    };
+  });
 }
 
-function formatSelectionMode(value: string | null | undefined): string {
-  if (!value) return '—';
-  return value
-    .split('-')
-    .map((part) => (part.length <= 3 ? part.toUpperCase() : part[0].toUpperCase() + part.slice(1)))
-    .join(' ');
-}
-
-function truncate(value: string, max = 140): string {
-  if (value.length <= max) return value;
-  return `${value.slice(0, max - 1).trimEnd()}…`;
-}
-
-// ──────────────────────────────────────────────────────────────────────────────
-
-function SocketDot({ state }: { state: SocketState }) {
-  const label =
-    state === 'live'
-      ? 'Live'
-      : state === 'connecting'
-      ? 'Connecting'
-      : state === 'reconnecting'
-      ? 'Reconnecting'
-      : state === 'stale'
-      ? 'Stale'
-      : 'Offline';
-  const title = state === 'stale' ? 'WebSocket: connected, but runtime updates are stale' : `WebSocket: ${label}`;
-  return (
-    <span className={`socket-dot socket-${state}`} title={title}>
-      <span className="socket-pip" aria-hidden />
-      <span className="socket-label">{label}</span>
-    </span>
-  );
-}
-
-function StatusBar({
-  runtime,
-  socketState,
-  freshness
-}: {
-  runtime: RuntimeState | null;
-  socketState: SocketState;
-  freshness: DashboardFreshness;
-}) {
-  const paused = runtime?.paused ?? false;
-  const stale = runtime?.marketData.stale ?? false;
-  const status = runtime?.strategy.status ?? 'idle';
-  const mode = runtime?.strategy.mode ?? runtime?.mode ?? 'paper';
-
-  const runLabel = paused ? 'Paused' : status === 'observing' ? 'Observing' : status[0].toUpperCase() + status.slice(1);
-  const runTone: Tone = paused ? 'warning' : strategyStatusTone(status);
-
-  return (
-    <header className="status-bar">
-      <div className="status-brand">
-        <span className="brand-mark" aria-hidden />
-        <div className="brand-text">
-          <span className="brand-name">Phantom3</span>
-          <span className="brand-sub">v2 paper desk</span>
-        </div>
-      </div>
-      <div className="status-chips">
-        <span className="chip chip-mode">{mode.toUpperCase()}</span>
-        <span className={`chip chip-${runTone}`}>{runLabel}</span>
-        <span className={`chip chip-${stale ? 'warning' : 'long'}`}>{stale ? 'Stale data' : 'Market live'}</span>
-        {freshness.stale ? <span className="chip chip-warning">Dashboard stale</span> : null}
-        <SocketDot state={socketState} />
-      </div>
-    </header>
-  );
-}
-
-function KpiStrip({ runtime }: { runtime: RuntimeState | null }) {
-  const strategy = runtime?.strategy;
-  const positions = strategy?.positions ?? [];
-  const unrealizedPnl = positions.reduce(
-    (sum, p) => sum + (typeof p.unrealizedPnlUsd === 'number' ? p.unrealizedPnlUsd : 0),
-    0
-  );
-  const hasPositions = positions.length > 0;
-  const pnlClass = hasPositions ? (unrealizedPnl >= 0 ? 'tone-long' : 'tone-short') : 'tone-idle';
-
-  const tiles: Array<{ label: string; value: string; hint?: string; tone?: string }> = [
-    {
-      label: 'Open exposure',
-      value: formatUsd(strategy?.openExposureUsd ?? null),
-      hint: strategy ? `${strategy.openPositionCount} position${strategy.openPositionCount === 1 ? '' : 's'}` : undefined
-    },
-    {
-      label: 'Unrealized P&L',
-      value: hasPositions ? formatSignedUsd(unrealizedPnl) : '—',
-      hint: hasPositions ? 'sum of open lots' : 'no open positions',
-      tone: pnlClass
-    },
-    {
-      label: 'Open intents',
-      value: formatInteger(strategy?.openIntentCount ?? 0),
-      hint: `${strategy?.candidateCount ?? 0} candidates`
-    },
-    {
-      label: 'Watched markets',
-      value: formatInteger(strategy?.watchedMarketCount ?? runtime?.markets.length ?? 0),
-      hint: runtime ? `sync every ${Math.round(runtime.marketData.refreshIntervalMs / 1000)}s` : undefined
-    },
-    {
-      label: 'Last eval',
-      value: formatRelative(strategy?.lastEvaluatedAt ?? null),
-      hint: strategy?.lastEvaluatedAt ? formatAbsoluteTime(strategy.lastEvaluatedAt) : 'awaiting first tick'
-    },
-    {
-      label: 'Runtime',
-      value: runtime?.version ? `v${runtime.version}` : '—',
-      hint: runtime?.startedAt ? `up ${formatRelative(runtime.startedAt)}` : undefined
-    }
-  ];
+function UpDownScanPanel({ scan, loading, onRefresh }: { scan: UpDownScanResult | null; loading: boolean; onRefresh: () => void }) {
+  const visibleRows = scan?.rows.slice(0, 9) ?? [];
+  const candidateCount = scan?.rows.filter((row) => row.decision === 'CANDIDATE').length ?? 0;
+  const watchCount = scan?.rows.filter((row) => row.decision === 'WATCH').length ?? 0;
+  const topDecision = candidateCount ? 'CANDIDATE' : watchCount ? 'WATCH' : 'SKIP';
+  const tone = topDecision === 'CANDIDATE' ? 'healthy' : topDecision === 'WATCH' ? 'warning' : 'blocked';
 
   return (
-    <section className="kpi-strip" aria-label="Key metrics">
-      {tiles.map((tile) => (
-        <div className={`kpi-tile ${tile.tone ?? ''}`} key={tile.label}>
-          <span className="kpi-label">{tile.label}</span>
-          <strong className="kpi-value num">{tile.value}</strong>
-          {tile.hint ? <span className="kpi-hint">{tile.hint}</span> : null}
-        </div>
-      ))}
-    </section>
-  );
-}
-
-// ──────────────────────────────────────────────────────────────────────────────
-
-function PositionRow({ position }: { position: PaperPositionSummary }) {
-  const pnl = position.unrealizedPnlUsd;
-  const tone = pnlTone(pnl);
-  const sideTone: Tone = position.side === 'yes' ? 'long' : 'short';
-  const exit = position.exit;
-
-  return (
-    <article className={`pos-row ${position.status === 'closed' ? 'is-closed' : ''}`}>
-      <div className="pos-main">
-        <div className="pos-headline">
-          <span className={`pill pill-${sideTone}`}>{position.side.toUpperCase()}</span>
-          <h3 title={position.marketQuestion}>{truncate(position.marketQuestion, 96)}</h3>
-        </div>
-        <div className="pos-meta">
-          <span>Opened {formatRelative(position.openedAt)}</span>
-          <span className={`pill pill-${position.status === 'open' ? 'info' : 'idle'} pill-ghost`}>
-            {position.status}
-          </span>
-        </div>
-      </div>
-      <div className="pos-metrics">
-        <div className="metric">
-          <span>Qty</span>
-          <strong className="num">{formatCompactNumber(position.quantity)}</strong>
-        </div>
-        <div className="metric">
-          <span>Avg</span>
-          <strong className="num">{formatPercent(position.averageEntryPrice, 1)}</strong>
-        </div>
-        <div className="metric">
-          <span>Mark</span>
-          <strong className="num">{formatPercent(position.markPrice, 1)}</strong>
-        </div>
-        <div className={`metric metric-pnl tone-${tone}`}>
-          <span>P&amp;L</span>
-          <strong className="num">{formatSignedUsd(pnl)}</strong>
-        </div>
-      </div>
-      {exit ? (
-        <div className="pos-exit">
-          <span className={`chip-xs chip-${exit.status === 'armed' ? 'info' : exit.status === 'triggered' ? 'warning' : 'long'}`}>
-            exit · {exit.status}
-          </span>
-          {exit.takeProfitPrice !== null ? (
-            <span className="chip-xs chip-long-ghost">
-              TP <span className="num">{formatPercent(exit.takeProfitPrice, 1)}</span>
-            </span>
-          ) : null}
-          {exit.stopLossPrice !== null ? (
-            <span className="chip-xs chip-short-ghost">
-              SL <span className="num">{formatPercent(exit.stopLossPrice, 1)}</span>
-            </span>
-          ) : null}
-          {exit.latestExitAt ? (
-            <span className="chip-xs chip-idle-ghost">by {formatRelative(exit.latestExitAt)}</span>
-          ) : null}
-          {exit.triggers.length ? (
-            <span className="chip-xs chip-warning-ghost">
-              {exit.triggers.slice(0, 2).join(' · ')}
-            </span>
-          ) : null}
-        </div>
-      ) : null}
-    </article>
-  );
-}
-
-function PositionsPanel({ positions }: { positions: PaperPositionSummary[] }) {
-  return (
-    <section className="panel panel-positions" aria-label="Open paper positions">
-      <header className="panel-head">
+    <section className="card updown-card">
+      <div className="section-head section-head-stack">
         <div>
-          <p className="eyebrow">Paper ledger</p>
-          <h2>Open positions</h2>
+          <p className="eyebrow">Crypto Up/Down scanner</p>
+          <h2>{candidateCount ? `${candidateCount} candidate${candidateCount === 1 ? '' : 's'}` : watchCount ? `${watchCount} watch setup${watchCount === 1 ? '' : 's'}` : 'No trade right now'}</h2>
         </div>
-        <span className="panel-count num">{positions.length}</span>
-      </header>
-      {positions.length ? (
-        <div className="pos-list">
-          {positions.map((position) => (
-            <PositionRow key={position.id} position={position} />
-          ))}
-        </div>
-      ) : (
-        <div className="empty-state">
-          <strong>No open positions.</strong>
-          <p>When the paper engine enters a market, lots will stream in here with live mark, TP/SL and P&amp;L.</p>
-        </div>
-      )}
-    </section>
-  );
-}
-
-// ──────────────────────────────────────────────────────────────────────────────
-
-function IntentRow({ intent }: { intent: PaperIntentSummary }) {
-  const sideTone: Tone = intent.side === 'yes' ? 'long' : 'short';
-  const kindLabel = intent.kind === 'exit' ? 'EXIT' : 'ENTRY';
-  const statusTone = intentStatusTone(intent.status);
-  const guard =
-    intent.maxEntryPrice !== null
-      ? `≤ ${formatPercent(intent.maxEntryPrice, 1)}`
-      : intent.limitPrice !== null
-      ? `@ ${formatPercent(intent.limitPrice, 1)}`
-      : '—';
-  return (
-    <article className="intent-row">
-      <div className="intent-badges">
-        <span className={`pill pill-${sideTone}`}>{intent.side.toUpperCase()}</span>
-        <span className={`pill pill-ghost pill-${intent.kind === 'exit' ? 'warning' : 'info'}`}>{kindLabel}</span>
-        {intent.reduceOnly ? <span className="pill pill-outline">reduce-only</span> : null}
-      </div>
-      <div className="intent-body">
-        <h3 title={intent.marketQuestion}>{truncate(intent.marketQuestion, 92)}</h3>
-        {intent.thesis ? <p className="intent-thesis">{truncate(intent.thesis, 140)}</p> : null}
-        <div className="intent-meta">
-          <span className="meta-key">size</span>
-          <span className="num">{formatUsd(intent.desiredSizeUsd)}</span>
-          <span className="meta-sep">·</span>
-          <span className="meta-key">price</span>
-          <span className="num">{guard}</span>
-          <span className="meta-sep">·</span>
-          <span className="meta-key">age</span>
-          <span>{formatRelative(intent.createdAt)}</span>
-          {intent.trigger ? (
-            <>
-              <span className="meta-sep">·</span>
-              <span className="meta-key">trigger</span>
-              <span>{intent.trigger}</span>
-            </>
-          ) : null}
+        <div className="scan-actions">
+          <span className={`status-pill ${tone}`}>{topDecision}</span>
+          <button className="secondary compact-button" disabled={loading} onClick={onRefresh}>{loading ? 'Scanning...' : 'Refresh'}</button>
         </div>
       </div>
-      <span className={`pill pill-${statusTone} pill-status`}>{intent.status}</span>
-    </article>
-  );
-}
-
-function IntentsPanel({ intents }: { intents: PaperIntentSummary[] }) {
-  return (
-    <section className="panel panel-intents" aria-label="Strategy intents">
-      <header className="panel-head">
-        <div>
-          <p className="eyebrow">Strategy intents</p>
-          <h2>Entry & exit queue</h2>
-        </div>
-        <span className="panel-count num">{intents.length}</span>
-      </header>
-      {intents.length ? (
-        <div className="intent-list">
-          {intents.slice(0, 8).map((intent) => (
-            <IntentRow key={intent.id} intent={intent} />
-          ))}
-        </div>
-      ) : (
-        <div className="empty-state">
-          <strong>No intents staged.</strong>
-          <p>Strategy will surface entry and reduce-only exit intents here as it evaluates watched markets.</p>
-        </div>
-      )}
-    </section>
-  );
-}
-
-// ──────────────────────────────────────────────────────────────────────────────
-
-function RiskRow({ decision }: { decision: RiskDecisionSummary }) {
-  const tone = decisionTone(decision.decision);
-  return (
-    <article className="risk-row">
-      <span className={`pill pill-${tone} pill-decision`}>{decision.decision}</span>
-      <div className="risk-body">
-        <h3 title={decision.question}>{truncate(decision.question, 88)}</h3>
-        <div className="risk-meta">
-          <span className="num">{formatUsd(decision.approvedSizeUsd)}</span>
-          <span className="meta-sep">·</span>
-          <span>{decision.kind}</span>
-          {decision.reduceOnly ? (
-            <>
-              <span className="meta-sep">·</span>
-              <span>reduce-only</span>
-            </>
-          ) : null}
-          <span className="meta-sep">·</span>
-          <span>{formatRelative(decision.createdAt)}</span>
-        </div>
-        {decision.reasons.length ? (
-          <div className="reason-chips">
-            {decision.reasons.slice(0, 4).map((reason, idx) => (
-              <span className="chip-xs chip-idle-ghost" key={`${decision.id}-${idx}`}>{reason}</span>
-            ))}
-          </div>
-        ) : null}
+      <p className="subtle">{scan?.note ?? 'Waiting for the first BTC/ETH/SOL 5m + 15m scan.'}</p>
+      <div className="summary-strip">
+        <div className="summary-tile"><span>Candidates</span><strong>{candidateCount}</strong></div>
+        <div className="summary-tile"><span>Watch</span><strong>{watchCount}</strong></div>
+        <div className="summary-tile"><span>Scanned</span><strong>{scan ? scan.rows.length : '...'}</strong></div>
+        <div className="summary-tile"><span>Updated</span><strong>{scan?.scannedAt ? new Date(scan.scannedAt).toLocaleTimeString() : '...'}</strong></div>
       </div>
-    </article>
-  );
-}
-
-function RiskPanel({ decisions }: { decisions: RiskDecisionSummary[] }) {
-  return (
-    <section className="panel panel-risk" aria-label="Risk decisions">
-      <header className="panel-head">
-        <div>
-          <p className="eyebrow">Risk gate</p>
-          <h2>Recent decisions</h2>
-        </div>
-        <span className="panel-count num">{decisions.length}</span>
-      </header>
-      {decisions.length ? (
-        <div className="risk-list">
-          {decisions.slice(0, 8).map((decision) => (
-            <RiskRow key={decision.id} decision={decision} />
-          ))}
-        </div>
-      ) : (
-        <div className="empty-state">
-          <strong>No risk activity.</strong>
-          <p>Approve / reject / resize decisions from the risk layer will render here as they happen.</p>
-        </div>
-      )}
-    </section>
-  );
-}
-
-// ──────────────────────────────────────────────────────────────────────────────
-
-function CandidateRow({ candidate }: { candidate: StrategyCandidate }) {
-  return (
-    <article className="cand-row">
-      <div className="cand-score">
-        <span>score</span>
-        <strong className="num">{formatCompactNumber(candidate.score)}</strong>
-      </div>
-      <div className="cand-body">
-        <h3 title={candidate.question}>{truncate(candidate.question, 84)}</h3>
-        <div className="cand-prices">
-          <span className="px-pill px-long">
-            YES <span className="num">{formatPercent(candidate.yesPrice, 1)}</span>
-          </span>
-          <span className="px-pill px-short">
-            NO <span className="num">{formatPercent(candidate.noPrice, 1)}</span>
-          </span>
-          <span className="px-pill px-neutral">
-            spread <span className="num">{formatPercent(candidate.spread, 1)}</span>
-          </span>
-          <span className="px-pill px-neutral">
-            liq <span className="num">{candidate.liquidity !== null ? compactUsdFormatter.format(candidate.liquidity) : '—'}</span>
-          </span>
-        </div>
-        {candidate.rationale ? <p className="cand-rationale">{truncate(candidate.rationale, 160)}</p> : null}
-      </div>
-      <span className={`pill pill-${candidate.status === 'watch' ? 'info' : 'warning'}`}>
-        {candidate.status}
-      </span>
-    </article>
-  );
-}
-
-function StrategyAndCandidates({ runtime }: { runtime: RuntimeState | null }) {
-  const strategy = runtime?.strategy;
-  if (!strategy) return null;
-  const candidates = strategy.candidates ?? [];
-  const routing = strategy.routing ?? null;
-  const statusTone = runtime.paused ? 'warning' : strategyStatusTone(strategy.status);
-
-  return (
-    <section className="panel panel-strategy" aria-label="Strategy engine">
-      <header className="panel-head">
-        <div>
-          <p className="eyebrow">Strategy engine</p>
-          <h2>{strategy.engineId}</h2>
-        </div>
-        <span className={`pill pill-${statusTone}`}>{runtime.paused ? 'paused' : strategy.status}</span>
-      </header>
-      <p className="panel-summary">{strategy.summary}</p>
-      {routing ? (
-        <div className={`strategy-route-card ${routing.executionMode === 'reference-only' ? 'is-reference' : 'is-active'}`}>
-          <div className="strategy-route-head">
-            <strong>{routing.requestedLabel}</strong>
-            <div className="strategy-route-badges">
-              <span className={`chip-xs chip-${strategyRoutingTone(routing)}-ghost`}>
-                {routing.executionMode === 'paper-active' ? 'active runtime' : 'reference only'}
-              </span>
-              <span className={`chip-xs chip-${strategyEntryPolicyTone(routing)}-ghost`}>
-                {routing.entryPolicy === 'emit-new-entries' ? 'new entries on' : 'manage open only'}
-              </span>
-            </div>
-          </div>
-          <p className="subtle small">{routing.summary}</p>
-          <div className="strategy-route-meta">
-            <span>evaluating with <strong>{routing.evaluatedLabel}</strong></span>
-            <span>selection mode <strong>{formatSelectionMode(routing.selectionMode)}</strong></span>
-            <span>strategy <strong className="num">{routing.strategyId}</strong></span>
-            <span>version <strong className="num">{routing.strategyVersion}</strong></span>
-          </div>
-        </div>
-      ) : null}
-      <div className="strategy-kv">
-        <div><span>Mode</span><strong>{strategy.mode}</strong></div>
-        <div><span>Watching</span><strong className="num">{strategy.watchedMarketCount}</strong></div>
-        <div><span>Candidates</span><strong className="num">{strategy.candidateCount}</strong></div>
-        <div><span>Intents</span><strong className="num">{strategy.openIntentCount}</strong></div>
-        <div><span>Exposure</span><strong className="num">{formatUsd(strategy.openExposureUsd)}</strong></div>
-        <div><span>Version</span><strong className="num">{strategy.strategyVersion}</strong></div>
-      </div>
-      {strategy.notes.length ? (
-        <ul className="strategy-notes">
-          {strategy.notes.slice(0, 5).map((note, idx) => (
-            <li key={idx}>{note}</li>
-          ))}
-        </ul>
-      ) : null}
-      <div className="panel-sub">
-        <header className="panel-sub-head">
-          <p className="eyebrow">{routing?.executionMode === 'reference-only' ? 'Baseline candidates' : 'Candidates'}</p>
-          <span className="panel-count num">{candidates.length}</span>
-        </header>
-        {candidates.length ? (
-          <div className="cand-list">
-            {candidates.slice(0, 5).map((candidate) => (
-              <CandidateRow key={candidate.marketId} candidate={candidate} />
-            ))}
-          </div>
-        ) : (
-          <p className="subtle small">
-            {routing?.executionMode === 'reference-only'
-              ? 'No baseline candidates are visible yet.'
-              : 'No candidates scored yet.'}
-          </p>
-        )}
-      </div>
-    </section>
-  );
-}
-
-// ──────────────────────────────────────────────────────────────────────────────
-
-function MarketsPanel({ runtime }: { runtime: RuntimeState | null }) {
-  const markets = runtime?.markets ?? [];
-  const stale = runtime?.marketData.stale ?? false;
-  return (
-    <section className="panel panel-markets" aria-label="Market snapshot">
-      <header className="panel-head">
-        <div>
-          <p className="eyebrow">Markets · read-only</p>
-          <h2>Polymarket snapshot</h2>
-        </div>
-        <span className={`chip chip-${stale ? 'warning' : 'long'}`}>
-          {stale ? 'stale' : 'live'} · {markets.length}
-        </span>
-      </header>
-      {markets.length ? (
-        <div className="market-grid">
-          {markets.slice(0, 8).map((market) => (
-            <article key={market.id} className="market-card">
-              <h3 title={market.question}>{truncate(market.question, 80)}</h3>
-              <p className="market-sub">{truncate(market.eventTitle, 60)}</p>
-              <div className="market-prices">
-                <div className="price-col price-yes">
-                  <span>{market.yesLabel}</span>
-                  <strong className="num">{formatPercent(market.yesPrice, 1)}</strong>
-                </div>
-                <div className="price-col price-no">
-                  <span>{market.noLabel}</span>
-                  <strong className="num">{formatPercent(market.noPrice, 1)}</strong>
-                </div>
-              </div>
-              <div className="market-meta">
-                <span>vol <span className="num">{market.volume24hr !== null ? compactUsdFormatter.format(market.volume24hr) : '—'}</span></span>
-                <span>liq <span className="num">{market.liquidity !== null ? compactUsdFormatter.format(market.liquidity) : '—'}</span></span>
-                <span>spr <span className="num">{formatPercent(market.spread, 1)}</span></span>
-              </div>
-              <a className="market-link" href={market.url} target="_blank" rel="noreferrer">open on Polymarket ↗</a>
-            </article>
-          ))}
-        </div>
-      ) : (
-        <p className="subtle">No live markets loaded yet.</p>
-      )}
-    </section>
-  );
-}
-
-// ──────────────────────────────────────────────────────────────────────────────
-
-function ControlsPanel({
-  token,
-  setToken,
-  busy,
-  loading,
-  sendControl,
-  saveTradingPreference,
-  runtime,
-  socketState,
-  freshness,
-  lastRuntimeMessageAt
-}: {
-  token: string;
-  setToken: (value: string) => void;
-  busy: boolean;
-  loading: boolean;
-  sendControl: (path: '/api/control/pause' | '/api/control/resume') => Promise<void> | void;
-  saveTradingPreference: (profile: TradingPreferenceOption['profile']) => Promise<void> | void;
-  runtime: RuntimeState | null;
-  socketState: SocketState;
-  freshness: DashboardFreshness;
-  lastRuntimeMessageAt: number | null;
-}) {
-  const tradingPreference = runtime?.tradingPreference;
-  const selectedPreference = tradingPreference?.selected ?? null;
-  const availablePreferences = tradingPreference?.available ?? [];
-  const routing = runtime?.strategy.routing ?? null;
-  const liveControl = liveControlBadge(runtime);
-  const lastConfirmedUpdate = lastRuntimeMessageAt ? new Date(lastRuntimeMessageAt).toISOString() : runtime?.lastHeartbeatAt ?? null;
-
-  return (
-    <section className="panel panel-controls" aria-label="Controls and access">
-      <header className="panel-head">
-        <div>
-          <p className="eyebrow">Controls</p>
-          <h2>Pause / resume</h2>
-        </div>
-        <span className={`pill pill-${runtime?.paused ? 'warning' : 'long'}`}>
-          {runtime?.paused ? 'paused' : 'running'}
-        </span>
-      </header>
-      <label className="token-field">
-        <span>Control token</span>
-        <input
-          type="password"
-          placeholder="Paste token to enable controls and save preference"
-          value={token}
-          onChange={(event) => setToken(event.target.value)}
-          autoComplete="off"
-        />
-      </label>
-      <p className="subtle small">Saved only for this browser tab. Closing the tab clears it.</p>
-      {freshness.stale ? (
-        <p className="subtle small">Updates are stale. Use controls cautiously until the stream resumes.</p>
-      ) : null}
-      <div className="button-row">
-        <button
-          className="btn btn-warning"
-          disabled={busy || loading || !token}
-          onClick={() => void sendControl('/api/control/pause')}
-        >
-          Pause
-        </button>
-        <button
-          className="btn btn-primary"
-          disabled={busy || loading || !token}
-          onClick={() => void sendControl('/api/control/resume')}
-        >
-          Resume
-        </button>
-      </div>
-
-      <div className="control-divider" />
-
-      <div className="preference-header">
-        <div>
-          <p className="mini-eyebrow">Trading preference</p>
-          <h3>{selectedPreference?.label ?? 'No preference selected'}</h3>
-        </div>
-        {selectedPreference ? (
-          <span className={`pill pill-${routing ? strategyRoutingTone(routing) : tradingPreferenceTone(selectedPreference)} pill-ghost`}>
-            {routing
-              ? routing.executionMode === 'paper-active'
-                ? 'active runtime'
-                : 'reference only'
-              : selectedPreference.parityStatus === 'current-runtime'
-                ? 'active runtime'
-                : 'reference only'}
-          </span>
-        ) : null}
-      </div>
-      {selectedPreference ? <p className="subtle small">{selectedPreference.note}</p> : null}
-      {routing ? (
-        <div className={`preference-route-note ${routing.executionMode === 'reference-only' ? 'is-reference' : 'is-active'}`}>
-          <div className="preference-route-head">
-            <strong>{routing.summary}</strong>
-            <span className={`chip-xs chip-${strategyEntryPolicyTone(routing)}-ghost`}>
-              {routing.entryPolicy === 'emit-new-entries' ? 'new entries enabled' : 'manage open positions only'}
-            </span>
-          </div>
-          <p className="subtle small">{routing.note}</p>
-          <div className="preference-route-meta">
-            <span>requested <strong>{routing.requestedLabel}</strong></span>
-            <span>evaluating <strong>{routing.evaluatedLabel}</strong></span>
-            <span>mode <strong>{formatSelectionMode(routing.selectionMode)}</strong></span>
-          </div>
-        </div>
-      ) : null}
-      <div className="preference-list">
-        {availablePreferences.map((option) => {
-          const selected = option.profile === selectedPreference?.profile;
-          const tone = tradingPreferenceTone(option);
-          return (
-            <article className={`preference-card ${selected ? 'is-selected' : ''}`} key={option.profile}>
-              <div className="preference-card-head">
+      {visibleRows.length ? (
+        <div className="updown-grid">
+          {visibleRows.map((row) => (
+            <article className="detail-card updown-row" key={row.slug}>
+              <div className="detail-card-head">
                 <div>
-                  <strong>{option.label}</strong>
-                  <p className="subtle small">{option.summary}</p>
+                  <h3>{row.asset} {row.window} · {row.side}</h3>
+                  <p>{row.minutesToEnd.toFixed(1)}m left · move {row.moveBps.toFixed(2)} bps · entry {formatPercent(row.sidePrice)}</p>
                 </div>
-                <span className={`chip-xs chip-${tone}-ghost`}>
-                  {selected
-                    ? routing
-                      ? routing.executionMode === 'paper-active'
-                        ? 'selected · active'
-                        : 'selected · reference'
-                      : option.parityStatus === 'current-runtime'
-                        ? 'selected · active'
-                        : 'selected · reference'
-                    : option.parityStatus === 'current-runtime'
-                      ? 'runtime'
-                      : 'reference'}
-                </span>
+                <span className={`badge ${row.decision === 'CANDIDATE' ? 'healthy' : row.decision === 'WATCH' ? 'warning' : 'blocked'}`}>{row.decision}</span>
               </div>
-              <p className="subtle small">{option.note}</p>
-              <div className="preference-meta">
-                <span>{option.intendedMarkets.join(' · ')}</span>
-                <span>{option.intendedTimeframes.join(' · ')}</span>
+              <div className="field-grid">
+                <div className="field-chip"><span>Up / Down</span><strong>{formatPercent(row.yes)} / {formatPercent(row.no)}</strong></div>
+                <div className="field-chip"><span>Spread</span><strong>{formatPercent(row.spread)}</strong></div>
+                <div className="field-chip"><span>Liquidity</span><strong>{formatMaybeMoney(row.liquidity)}</strong></div>
+                <div className="field-chip"><span>Blockers</span><strong>{row.blockers.length ? row.blockers.join(', ') : 'none'}</strong></div>
               </div>
-              <button
-                className={`btn ${selected ? 'btn-secondary' : 'btn-primary'}`}
-                disabled={busy || loading || !token || selected}
-                onClick={() => void saveTradingPreference(option.profile)}
-              >
-                {selected ? 'Selected' : 'Use this profile'}
-              </button>
+              <a className="market-link" href={row.url} target="_blank" rel="noreferrer">open market</a>
             </article>
-          );
-        })}
-      </div>
-
-      <p className="subtle small">
-        Paper-only runtime. Controls flip strategy evaluation on or off. Preference selection now routes through an explicit profile layer so the dashboard can show when a profile is active versus reference-only.
-      </p>
-      <div className="access-kv">
-        <div><span>Public URL</span><strong>{runtime?.publicBaseUrl ?? '—'}</strong></div>
-        <div><span>Transport</span><strong>WebSocket · {socketState}</strong></div>
-        <div><span>Live control</span><strong className={`pill pill-${liveControl.tone} pill-ghost`}>{liveControl.label}</strong></div>
-        <div><span>Entry policy</span><strong>{routing ? (routing.entryPolicy === 'emit-new-entries' ? 'emit new paper entries' : 'manage open positions only') : '—'}</strong></div>
-        <div><span>Evaluator</span><strong>{routing?.evaluatedLabel ?? '—'}</strong></div>
-        <div><span>Last update</span><strong className="num">{formatRelative(lastConfirmedUpdate)}</strong></div>
-        <div><span>Heartbeat</span><strong className="num">{runtime?.lastHeartbeatAt ? new Date(runtime.lastHeartbeatAt).toLocaleTimeString() : '—'}</strong></div>
-      </div>
-    </section>
-  );
-}
-
-// ──────────────────────────────────────────────────────────────────────────────
-
-function EventsPanel({ runtime }: { runtime: RuntimeState | null }) {
-  const [expanded, setExpanded] = useState(false);
-  const events = runtime?.events ?? [];
-  const preview = expanded ? events : events.slice(0, 3);
-  return (
-    <section className="panel panel-events" aria-label="Event log">
-      <header className="panel-head">
-        <div>
-          <p className="eyebrow">Event log</p>
-          <h2>Latest activity</h2>
-        </div>
-        <button
-          type="button"
-          className="link-button"
-          onClick={() => setExpanded((v) => !v)}
-          disabled={events.length <= 3}
-        >
-          {expanded ? 'collapse' : `show all (${events.length})`}
-        </button>
-      </header>
-      {preview.length ? (
-        <ul className="event-list">
-          {preview.map((entry) => (
-            <li className={`event event-${entry.level}`} key={entry.id}>
-              <span className={`chip-xs chip-${entry.level === 'error' ? 'short' : entry.level === 'warning' ? 'warning' : 'info'}-ghost`}>
-                {entry.level}
-              </span>
-              <div className="event-body">
-                <strong>{entry.message}</strong>
-                <span className="event-time">{formatRelative(entry.at)} · {formatAbsoluteTime(entry.at)}</span>
-              </div>
-            </li>
           ))}
-        </ul>
+        </div>
       ) : (
-        <p className="subtle small">No events yet.</p>
+        <div className="empty-state">No scan rows yet.</div>
       )}
     </section>
   );
 }
 
-function ModulesAndWatchlist({ runtime }: { runtime: RuntimeState | null }) {
+function DetailSection({ eyebrow, title, subtitle, emptyState, items }: DetailSectionProps) {
   return (
-    <section className="panel panel-modules" aria-label="Modules and watchlist">
-      <header className="panel-head">
+    <article className="card">
+      <div className="section-head section-head-stack">
         <div>
-          <p className="eyebrow">Infrastructure</p>
-          <h2>Modules &amp; watchlist</h2>
+          <p className="eyebrow">{eyebrow}</p>
+          <h2>{title}</h2>
         </div>
-      </header>
-      <div className="module-split">
-        <div>
-          <p className="mini-eyebrow">Modules</p>
-          <ul className="module-mini-list">
-            {runtime?.modules.map((module) => {
-              const badge = moduleBadge(module, runtime);
-              return (
-                <li key={module.id} className={`module-mini module-${module.status}`}>
-                  <span className={`chip-xs chip-${badge.tone}-ghost`}>
-                    {badge.label}
-                  </span>
-                  <div>
-                    <strong>{module.name}</strong>
-                    <p className="subtle small">{module.summary}</p>
-                  </div>
-                </li>
-              );
-            })}
-          </ul>
-        </div>
-        <div>
-          <p className="mini-eyebrow">Watchlist</p>
-          <ul className="module-mini-list">
-            {runtime?.watchlist.map((entry) => {
-              const badge = watchEntryBadge(entry, runtime);
-              return (
-                <li key={entry.id} className="module-mini">
-                  <span className={`chip-xs chip-${badge.tone}-ghost`}>
-                    {badge.label}
-                  </span>
-                  <div>
-                    <strong>{entry.label}</strong>
-                    <p className="subtle small">{entry.note}</p>
-                  </div>
-                </li>
-              );
-            })}
-          </ul>
-        </div>
+        <p className="subtle small">{subtitle}</p>
       </div>
-    </section>
+
+      {items.length ? (
+        <div className="detail-list">
+          {items.map((item) => (
+            <article className="detail-card" key={item.id}>
+              <div className="detail-card-head">
+                <div>
+                  <h3>{item.title}</h3>
+                  {item.subtitle ? <p>{item.subtitle}</p> : null}
+                </div>
+                <span className={`badge ${item.tone}`}>{item.badge}</span>
+              </div>
+              {item.fields.length ? (
+                <div className="field-grid">
+                  {item.fields.map((field) => (
+                    <div className="field-chip" key={`${item.id}-${field.label}`}>
+                      <span>{field.label}</span>
+                      <strong>{field.value}</strong>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+            </article>
+          ))}
+        </div>
+      ) : (
+        <div className="empty-state">{emptyState}</div>
+      )}
+    </article>
   );
 }
-
-// ──────────────────────────────────────────────────────────────────────────────
 
 export function App() {
   const [runtime, setRuntime] = useState<RuntimeState | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [token, setToken] = useState(() => readSessionToken());
+  const [token, setToken] = useState(() => localStorage.getItem(tokenStorageKey) ?? '');
   const [busy, setBusy] = useState(false);
   const [socketState, setSocketState] = useState<SocketState>('connecting');
-  const [lastRuntimeMessageAt, setLastRuntimeMessageAt] = useState<number | null>(null);
-  const [now, setNow] = useState(() => Date.now());
+  const [incidentReason, setIncidentReason] = useState('operator-requested');
+  const [upDownScan, setUpDownScan] = useState<UpDownScanResult | null>(null);
+  const [upDownLoading, setUpDownLoading] = useState(false);
+
+  const refreshUpDownScan = async () => {
+    setUpDownLoading(true);
+    try {
+      setUpDownScan(await fetchUpDownScan());
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Up/Down scan failed');
+    } finally {
+      setUpDownLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void refreshUpDownScan();
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
     let socket: WebSocket | null = null;
     let reconnectTimer: number | null = null;
 
-    clearLegacyTokenStorage();
-    const sessionToken = token.trim();
-    syncTokenCookie(sessionToken);
-
-    if (!sessionToken) {
-      setRuntime(null);
-      setLastRuntimeMessageAt(null);
-      setLoading(false);
-      setSocketState('offline');
-      setError('Enter the control token to unlock runtime data and controls.');
-      return () => undefined;
-    }
-
-    setLoading(true);
+    const loadFallback = async () => {
+      try {
+        const next = await fetchRuntime();
+        if (!cancelled) {
+          setRuntime(next);
+          setLoading(false);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : 'Unknown error');
+          setLoading(false);
+        }
+      }
+    };
 
     const connect = () => {
       setSocketState((current) => (current === 'live' ? 'reconnecting' : 'connecting'));
       socket = new WebSocket(websocketUrl());
 
       socket.addEventListener('open', () => {
-        if (cancelled) return;
+        if (cancelled) {
+          return;
+        }
         setSocketState('live');
         setError(null);
       });
 
       socket.addEventListener('message', (event) => {
-        if (cancelled) return;
+        if (cancelled) {
+          return;
+        }
         try {
-          const message = JSON.parse(event.data) as RuntimeEnvelope;
+          const message = JSON.parse(event.data) as RuntimeEnvelope | { type: 'pong'; at: string };
           if (message.type === 'runtime') {
             setRuntime(message.data);
-            setLastRuntimeMessageAt(Date.now());
             setLoading(false);
             setError(null);
           }
@@ -1028,76 +589,57 @@ export function App() {
       });
 
       socket.addEventListener('error', () => {
-        if (!cancelled) setSocketState('offline');
+        if (!cancelled) {
+          setSocketState('offline');
+        }
       });
 
       socket.addEventListener('close', () => {
-        if (cancelled) return;
+        if (cancelled) {
+          return;
+        }
         setSocketState('reconnecting');
         reconnectTimer = window.setTimeout(connect, 1500);
       });
     };
 
-    const loadAndConnect = async () => {
-      try {
-        const next = await fetchRuntime(sessionToken);
-        if (cancelled) return;
-        setRuntime(next);
-        setLastRuntimeMessageAt(Date.now());
-        setLoading(false);
-        setError(null);
-        connect();
-      } catch (err) {
-        if (!cancelled) {
-          setRuntime(null);
-          setLastRuntimeMessageAt(null);
-          setSocketState('offline');
-          setError(err instanceof Error ? err.message : 'Unknown error');
-          setLoading(false);
-        }
-      }
-    };
-
-    void loadAndConnect();
+    void loadFallback();
+    connect();
 
     return () => {
       cancelled = true;
-      if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
+      if (reconnectTimer !== null) {
+        window.clearTimeout(reconnectTimer);
+      }
       socket?.close();
     };
-  }, [token]);
-
-  useEffect(() => {
-    writeSessionToken(token);
-  }, [token]);
-
-  useEffect(() => {
-    const timer = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(timer);
   }, []);
 
-  const { positions, intents, riskDecisions } = useMemo(() => {
-    const strategy = runtime?.strategy;
-    return {
-      positions: strategy?.positions ?? [],
-      intents: strategy?.intents ?? [],
-      riskDecisions: strategy?.riskDecisions ?? []
-    };
+  useEffect(() => {
+    localStorage.setItem(tokenStorageKey, token);
+  }, [token]);
+
+  const statusTone = useMemo(() => {
+    if (!runtime) return 'idle';
+    if (runtime.paused || runtime.marketData.stale) return 'warning';
+    return 'healthy';
   }, [runtime]);
 
-  const dashboardFreshness = useMemo(
-    () => deriveDashboardFreshness({
-      now,
-      lastRuntimeMessageAt,
-      lastHeartbeatAt: runtime?.lastHeartbeatAt ?? null
-    }),
-    [lastRuntimeMessageAt, now, runtime?.lastHeartbeatAt]
-  );
-  const effectiveSocketState: SocketState = socketState === 'live' && dashboardFreshness.stale ? 'stale' : socketState;
+  const candidateIntents = useMemo(() => buildCandidateIntentCards(runtime), [runtime]);
+  const riskDecisions = useMemo(() => buildRiskDecisionCards(runtime), [runtime]);
+  const paperPositions = useMemo(() => buildPaperPositionCards(runtime), [runtime]);
+  const strategyPanel = useMemo(() => extractStrategyPanel(runtime), [runtime]);
+  const liveControl = runtime?.execution.live ?? null;
+  const liveTone = useMemo<Tone>(() => {
+    if (!liveControl) return 'idle';
+    if (liveControl.status === 'blocked-by-reconcile') return 'blocked';
+    if (liveControl.killSwitchActive || liveControl.status === 'scaffold') return 'warning';
+    if (liveControl.status === 'adapter-ready') return liveControl.armed ? 'healthy' : 'info';
+    return 'idle';
+  }, [liveControl]);
 
-  const sendControl = async (path: '/api/control/pause' | '/api/control/resume') => {
-    const sessionToken = token.trim();
-    if (!sessionToken) {
+  const sendControl = async (path: ControlPath, body?: Record<string, unknown>) => {
+    if (!token) {
       setError('Control token required for write actions.');
       return;
     }
@@ -1105,15 +647,18 @@ export function App() {
     try {
       const response = await fetch(path, {
         method: 'POST',
-        headers: buildControlHeaders(sessionToken)
+        headers: {
+          'x-wraith-token': token,
+          ...(body ? { 'content-type': 'application/json' } : {})
+        },
+        body: body ? JSON.stringify(body) : undefined
       });
       if (!response.ok) {
-        const payload = await response.json().catch(() => ({} as { error?: string }));
+        const payload = await response.json().catch(() => ({}));
         throw new Error(payload.error || 'Control action failed');
       }
-      const next = await fetchRuntime(sessionToken);
+      const next = await fetchRuntime();
       setRuntime(next);
-      setLastRuntimeMessageAt(Date.now());
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Control action failed');
@@ -1122,95 +667,320 @@ export function App() {
     }
   };
 
-  const saveTradingPreference = async (profile: TradingPreferenceOption['profile']) => {
-    const sessionToken = token.trim();
-    if (!sessionToken) {
-      setError('Control token required for write actions.');
-      return;
-    }
-    setBusy(true);
-    try {
-      const response = await fetch('/api/control/trading-preference', {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          ...buildControlHeaders(sessionToken)
-        },
-        body: JSON.stringify({ profile })
-      });
-      if (!response.ok) {
-        const payload = await response.json().catch(() => ({} as { error?: string }));
-        throw new Error(payload.error || 'Trading preference update failed');
-      }
-      const next = await fetchRuntime(sessionToken);
-      setRuntime(next);
-      setLastRuntimeMessageAt(Date.now());
-      setError(null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Trading preference update failed');
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const lastConfirmedUpdate = lastRuntimeMessageAt ? new Date(lastRuntimeMessageAt).toISOString() : runtime?.lastHeartbeatAt ?? null;
-
   return (
-    <div className="app-shell">
-      <StatusBar runtime={runtime} socketState={effectiveSocketState} freshness={dashboardFreshness} />
-      <main className="app-main">
-        {error ? (
-          <div className="error-banner" role="alert">
-            <strong>⚠ {error}</strong>
-            <button type="button" className="link-button" onClick={() => setError(null)}>dismiss</button>
+    <main className="page">
+      <section className="hero card">
+        <div>
+          <p className="eyebrow">Wraith</p>
+          <h1>Phone-ready observer dashboard</h1>
+          <p className="subtle">
+            Safe-by-default v2 control plane. Market truth is now read live from Polymarket, while write actions remain token-gated.
+          </p>
+        </div>
+        <div className={`status-pill ${statusTone}`}>
+          {runtime?.paused ? 'Paused' : runtime ? 'Running' : 'Loading'}
+        </div>
+      </section>
+
+      {error ? <section className="card error-banner">{error}</section> : null}
+
+      <section className="grid two-up">
+        <article className="card">
+          <p className="eyebrow">Access</p>
+          <h2>{runtime?.publicBaseUrl ?? '...'}</h2>
+          <p className="subtle">Open this URL from your phone while on the same network.</p>
+          <div className="kv-list">
+            <div><span>Mode</span><strong>{runtime?.mode ?? '...'}</strong></div>
+            <div><span>Transport</span><strong>{`WebSocket (${socketState})`}</strong></div>
+            <div><span>Remote dashboard</span><strong>{runtime?.remoteDashboardEnabled ? 'enabled' : 'disabled'}</strong></div>
+            <div><span>Last heartbeat</span><strong>{runtime?.lastHeartbeatAt ? new Date(runtime.lastHeartbeatAt).toLocaleTimeString() : '...'}</strong></div>
+          </div>
+        </article>
+
+        <article className="card">
+          <p className="eyebrow">Market sync</p>
+          <h2>{runtime?.marketData.stale ? 'Sync degraded' : `${runtime?.markets.length ?? 0} live markets`}</h2>
+          <p className="subtle">Read-only snapshot from {runtime?.marketData.source ?? '...'}</p>
+          <div className="kv-list">
+            <div><span>Status</span><strong>{runtime?.marketData.stale ? 'stale' : 'live'}</strong></div>
+            <div><span>Cadence</span><strong>{runtime ? `${Math.round(runtime.marketData.refreshIntervalMs / 1000)}s` : '...'}</strong></div>
+            <div><span>Last sync</span><strong>{runtime?.marketData.syncedAt ? new Date(runtime.marketData.syncedAt).toLocaleTimeString() : '...'}</strong></div>
+            <div><span>Error</span><strong>{runtime?.marketData.error ?? 'none'}</strong></div>
+          </div>
+        </article>
+      </section>
+
+      <UpDownScanPanel scan={upDownScan} loading={upDownLoading} onRefresh={() => void refreshUpDownScan()} />
+
+      <section className="card">
+        <div className="section-head section-head-stack">
+          <div>
+            <p className="eyebrow">Strategy pulse</p>
+            <h2>{strategyPanel.heading}</h2>
+          </div>
+          <span className={`status-pill ${strategyPanel.tone}`}>{strategyPanel.badge}</span>
+        </div>
+        <p className="subtle">{strategyPanel.summary}</p>
+        <div className="summary-strip">
+          <div className="summary-tile">
+            <span>Candidate intents</span>
+            <strong>{candidateIntents.length}</strong>
+          </div>
+          <div className="summary-tile">
+            <span>Risk decisions</span>
+            <strong>{riskDecisions.length}</strong>
+          </div>
+          <div className="summary-tile">
+            <span>Paper positions</span>
+            <strong>{paperPositions.length}</strong>
+          </div>
+          <div className="summary-tile">
+            <span>Runtime mode</span>
+            <strong>{runtime?.mode ?? '...'}</strong>
+          </div>
+        </div>
+        {strategyPanel.fields.length ? (
+          <div className="field-grid field-grid-spacious">
+            {strategyPanel.fields.map((field) => (
+              <div className="field-chip" key={field.label}>
+                <span>{field.label}</span>
+                <strong>{field.value}</strong>
+              </div>
+            ))}
           </div>
         ) : null}
-        {dashboardFreshness.stale ? (
-          <div className="warning-banner" role="status">
-            <strong>{dashboardFreshness.reason === 'heartbeat' ? 'Runtime heartbeat stalled.' : 'Dashboard updates stalled.'}</strong>
-            <span>
-              Last confirmed update {formatRelative(lastConfirmedUpdate)}. Treat prices, badges, and controls as potentially outdated until the stream recovers.
-            </span>
+      </section>
+
+      <section className="card">
+        <div className="section-head section-head-stack">
+          <div>
+            <p className="eyebrow">Live control plane</p>
+            <h2>{liveControl ? humanizeKey(liveControl.status) : 'Loading live controls'}</h2>
           </div>
-        ) : null}
-
-        <KpiStrip runtime={runtime} />
-
-        <div className="grid-primary">
-          <PositionsPanel positions={positions} />
-          <RiskPanel decisions={riskDecisions} />
+          <span className={`status-pill ${liveTone}`}>{liveControl?.armed ? 'armed' : liveControl ? 'disarmed' : 'loading'}</span>
         </div>
-
-        <IntentsPanel intents={intents} />
-
-        <div className="grid-secondary">
-          <StrategyAndCandidates runtime={runtime} />
-          <ControlsPanel
-            token={token}
-            setToken={setToken}
-            busy={busy}
-            loading={loading}
-            sendControl={sendControl}
-            saveTradingPreference={saveTradingPreference}
-            runtime={runtime}
-            socketState={effectiveSocketState}
-            freshness={dashboardFreshness}
-            lastRuntimeMessageAt={lastRuntimeMessageAt}
-          />
+        <p className="subtle">{liveControl?.summary ?? 'Waiting for live control state.'}</p>
+        <div className="summary-strip">
+          <div className="summary-tile">
+            <span>Adapter</span>
+            <strong>{liveControl ? (liveControl.liveAdapterReady ? 'ready' : liveControl.configured ? 'scaffold' : 'paper-only') : '...'}</strong>
+          </div>
+          <div className="summary-tile">
+            <span>Can arm</span>
+            <strong>{liveControl ? (liveControl.canArm ? 'yes' : 'no') : '...'}</strong>
+          </div>
+          <div className="summary-tile">
+            <span>Flatten path</span>
+            <strong>{liveControl ? humanizeKey(liveControl.flattenPath) : '...'}</strong>
+          </div>
+          <div className="summary-tile">
+            <span>Kill switch</span>
+            <strong>{liveControl?.killSwitchActive ? 'latched' : 'clear'}</strong>
+          </div>
         </div>
-
-        <MarketsPanel runtime={runtime} />
-
-        <div className="grid-tertiary">
-          <EventsPanel runtime={runtime} />
-          <ModulesAndWatchlist runtime={runtime} />
+        <div className="field-grid field-grid-spacious">
+          <div className="field-chip">
+            <span>Blocking reason</span>
+            <strong>{liveControl?.blockingReason ?? 'none'}</strong>
+          </div>
+          <div className="field-chip">
+            <span>Last operator action</span>
+            <strong>
+              {liveControl?.lastOperatorAction
+                ? `${humanizeKey(liveControl.lastOperatorAction)}${liveControl.lastOperatorActionAt ? ` · ${new Date(liveControl.lastOperatorActionAt).toLocaleString()}` : ''}`
+                : 'none'}
+            </strong>
+          </div>
         </div>
+      </section>
 
-        <footer className="app-foot">
-          <span>Phantom3 v2 · paper-only observer · {runtime?.version ? `v${runtime.version}` : ''}</span>
-          <span className="subtle small">No real exchange writes are performed. This is a paper-trading dashboard.</span>
-        </footer>
-      </main>
-    </div>
+      <section className="grid two-up">
+        <DetailSection
+          eyebrow="Strategy output"
+          title={`Candidate intents (${candidateIntents.length})`}
+          subtitle={candidateIntents.length ? 'Latest strategy ideas that reached the dashboard.' : 'This list stays empty until the strategy payload publishes candidate intents.'}
+          emptyState="No candidate intents in the current runtime payload yet. When the strategy engine starts emitting them, they will appear here automatically."
+          items={candidateIntents}
+        />
+        <DetailSection
+          eyebrow="Risk gate"
+          title={`Risk decisions (${riskDecisions.length})`}
+          subtitle={riskDecisions.length ? 'Latest approve, reject, or resize outcomes from the risk layer.' : 'This list stays empty until the runtime payload includes risk decisions.'}
+          emptyState="No risk decisions are present yet. Approved, rejected, or resized intents will render here once the risk layer starts publishing them."
+          items={riskDecisions}
+        />
+      </section>
+
+      <DetailSection
+        eyebrow="Paper ledger"
+        title={`Paper positions (${paperPositions.length})`}
+        subtitle={paperPositions.length ? 'Open or recently updated paper positions from the runtime payload.' : 'The dashboard is ready for paper positions as soon as the runtime starts exposing them.'}
+        emptyState="No paper positions are available yet. Position lots or paper holdings will appear here once they are added to runtime state."
+        items={paperPositions}
+      />
+
+      <section className="card">
+        <div className="section-head">
+          <div>
+            <p className="eyebrow">Markets</p>
+            <h2>Read-only Polymarket snapshot</h2>
+          </div>
+        </div>
+        {runtime?.markets.length ? (
+          <div className="module-grid market-grid">
+            {runtime.markets.map((market) => (
+              <article key={market.id} className="module-card market-card">
+                <div className={`module-status ${runtime.marketData.stale ? 'warning' : 'healthy'}`}>
+                  {runtime.marketData.stale ? 'stale' : 'live'}
+                </div>
+                <div>
+                  <h3>{market.question}</h3>
+                  <p>{market.eventTitle}</p>
+                </div>
+                <div className="price-row">
+                  <div>
+                    <span>{market.yesLabel}</span>
+                    <strong>{formatPercent(market.yesPrice)}</strong>
+                  </div>
+                  <div>
+                    <span>{market.noLabel}</span>
+                    <strong>{formatPercent(market.noPrice)}</strong>
+                  </div>
+                </div>
+                <div className="market-meta">
+                  <span>24h vol {formatMaybeMoney(market.volume24hr)}</span>
+                  <span>liq {formatMaybeMoney(market.liquidity)}</span>
+                  <span>spread {formatPercent(market.spread)}</span>
+                </div>
+                <a className="market-link" href={market.url} target="_blank" rel="noreferrer">open market</a>
+              </article>
+            ))}
+          </div>
+        ) : (
+          <p className="subtle">No live markets loaded yet.</p>
+        )}
+      </section>
+
+      <section className="grid two-up">
+        <article className="card">
+          <p className="eyebrow">Controls</p>
+          <label className="token-field">
+            <span>Control token</span>
+            <input
+              type="password"
+              placeholder="Paste token to enable controls"
+              value={token}
+              onChange={(event) => setToken(event.target.value)}
+            />
+          </label>
+          <label className="token-field control-note-field">
+            <span>Kill-switch / incident note</span>
+            <input
+              type="text"
+              placeholder="operator-requested"
+              value={incidentReason}
+              onChange={(event) => setIncidentReason(event.target.value)}
+            />
+          </label>
+          <div className="control-group">
+            <span>Runtime</span>
+            <div className="button-row">
+              <button disabled={busy || loading} onClick={() => void sendControl('/api/control/pause')}>Pause</button>
+              <button className="secondary" disabled={busy || loading} onClick={() => void sendControl('/api/control/resume')}>Resume</button>
+            </div>
+          </div>
+          <div className="control-group">
+            <span>Live arming</span>
+            <div className="button-row">
+              <button disabled={busy || loading || !liveControl?.canArm} onClick={() => void sendControl('/api/control/live/arm')}>Arm live</button>
+              <button className="secondary" disabled={busy || loading || !liveControl?.armed} onClick={() => void sendControl('/api/control/live/disarm')}>Disarm live</button>
+            </div>
+          </div>
+          <div className="control-group">
+            <span>Flatten</span>
+            <div className="button-row">
+              <button
+                className={liveControl?.flattenPath === 'live' ? '' : 'secondary'}
+                disabled={busy || loading || !liveControl?.flattenSupported}
+                onClick={() => void sendControl('/api/control/flatten')}
+              >
+                {liveControl?.flattenPath === 'live'
+                  ? 'Reduce-only flatten'
+                  : liveControl?.flattenPath === 'paper'
+                    ? 'Flatten paper positions'
+                    : 'Flatten blocked'}
+              </button>
+            </div>
+          </div>
+          <div className="control-group">
+            <span>Incident control</span>
+            <div className="button-row">
+              <button
+                disabled={busy || loading || Boolean(liveControl?.killSwitchActive)}
+                onClick={() => void sendControl('/api/control/kill-switch/engage', { reason: incidentReason || 'operator-requested' })}
+              >
+                Engage kill switch
+              </button>
+              <button
+                className="secondary"
+                disabled={busy || loading || !liveControl?.killSwitchActive}
+                onClick={() => void sendControl('/api/control/kill-switch/release')}
+              >
+                Release kill switch
+              </button>
+            </div>
+          </div>
+          <p className="subtle small">{liveControl?.summary ?? 'Waiting for control readiness.'}</p>
+        </article>
+
+        <article className="card">
+          <p className="eyebrow">Watchlist</p>
+          <div className="stack-list">
+            {runtime?.watchlist.map((entry) => (
+              <div className="list-item" key={entry.id}>
+                <div>
+                  <strong>{entry.label}</strong>
+                  <p>{entry.note}</p>
+                </div>
+                <span className={`badge ${entry.status}`}>{entry.status}</span>
+              </div>
+            ))}
+          </div>
+        </article>
+      </section>
+
+      <section className="card">
+        <div className="section-head">
+          <div>
+            <p className="eyebrow">Modules</p>
+            <h2>Current v2 surfaces</h2>
+          </div>
+        </div>
+        <div className="module-grid">
+          {runtime?.modules.map((module) => (
+            <article key={module.id} className="module-card">
+              <div className={`module-status ${module.status}`}>{module.status}</div>
+              <h3>{module.name}</h3>
+              <p>{module.summary}</p>
+            </article>
+          ))}
+        </div>
+      </section>
+
+      <section className="card">
+        <p className="eyebrow">Event log</p>
+        <div className="event-list">
+          {runtime?.events.map((entry) => (
+            <div className={`event ${entry.level}`} key={entry.id}>
+              <div>
+                <strong>{entry.message}</strong>
+                <p>{new Date(entry.at).toLocaleString()}</p>
+              </div>
+              <span>{entry.level}</span>
+            </div>
+          ))}
+        </div>
+      </section>
+    </main>
   );
 }

@@ -4,13 +4,13 @@ Status: planned / **no-go for live capital**
 Updated: 2026-04-22
 
 This file exists to prevent operator overconfidence.
-The presence of live flags, endpoints, or adapter code does **not** mean Phantom3 v2 is ready to trade real money.
+The presence of live flags, endpoints, or adapter code does **not** mean Wraith is ready to trade real money.
 
 ## Hard-stop warnings
 
 1. **Do not trade live capital from this repo today.**
 2. **Do not infer readiness from config flags.**
-   `PHANTOM3_V2_ENABLE_LIVE_MODE`, `PHANTOM3_V2_ENABLE_LIVE_ARMING`, and `PHANTOM3_V2_LIVE_EXECUTION_ENABLED` are scaffolding gates, not a safety checklist.
+   `WRAITH_ENABLE_LIVE_MODE`, `WRAITH_ENABLE_LIVE_ARMING`, and `WRAITH_LIVE_EXECUTION_ENABLED` are scaffolding gates, not a safety checklist.
 3. **Do not infer readiness from control endpoints.**
    `/api/control/live/*`, `/api/control/flatten`, and `/api/control/kill-switch/*` exist, but the main API runtime still does not run a venue-backed boot reconciliation flow.
 4. **Do not auto-resume after restart.**
@@ -55,6 +55,6 @@ If any of those are missing, ambiguous, or only simulated in UI state, the answe
 
 ## Operator stance right now
 
-If asked whether Phantom3 v2 can safely trade live capital today, the correct answer is:
+If asked whether Wraith can safely trade live capital today, the correct answer is:
 
 **no. keep it paper-only until the live thin slice proves restart-safe, evidence-first reconciliation end-to-end.**

@@ -1,4 +1,4 @@
-# Phantom3 v2 Architecture Draft
+# Wraith Architecture Draft
 
 Status: draft
 Date: 2026-04-20
@@ -9,7 +9,7 @@ Source baseline: `Phantom3` v1 audit + phase-0 hardening
 Do **not** keep growing v1 as the real trading system.
 Do **not** do a giant blind rewrite either.
 
-Recommended path: build **Phantom3 v2** as a **controlled rebuild** using v1 as a frozen reference and test corpus.
+Recommended path: build **Wraith** as a **controlled rebuild** using v1 as a frozen reference and test corpus.
 
 ## Primary recommendation
 
@@ -76,7 +76,7 @@ That makes continued patching expensive and untrustworthy.
 
 ## v2 scope
 
-Phantom3 v2 should contain these major modules.
+Wraith should contain these major modules.
 
 ### 1) Config + capability gates
 
@@ -96,7 +96,6 @@ Rules:
 
 Owns:
 - Polymarket market discovery
-- explicit venue-scoped transport selection for Polymarket reads
 - token/market normalization
 - order book snapshots or best executable price
 - websocket subscriptions where available
@@ -255,7 +254,7 @@ This lets us answer:
 Recommended repo shape for v2:
 
 ```text
-phantom3-v2/
+wraith/
   apps/
     api/
     web/
@@ -495,7 +494,7 @@ If we keep it in this repo, use a hard boundary like `v2/` and do not blend file
 
 ## Final recommendation
 
-If we continue, build **Phantom3 v2 as a TypeScript modular monolith with Postgres-backed ledger truth**.
+If we continue, build **Wraith as a TypeScript modular monolith with Postgres-backed ledger truth**.
 
 Use v1 only as:
 - reference logic

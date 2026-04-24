@@ -1,11 +1,10 @@
-import {
-  RUNTIME_MIDPOINT_REFERENCE_PRICE_SOURCE,
-  type RuntimeExecutionSummary,
-  type RuntimeLiveControl,
-  type RuntimeMarket,
-  type RuntimeState,
-  type RuntimeTradeStateCounts,
-  type RuntimeTradeSummary
+import type {
+  RuntimeExecutionSummary,
+  RuntimeLiveControl,
+  RuntimeMarket,
+  RuntimeState,
+  RuntimeTradeStateCounts,
+  RuntimeTradeSummary
 } from '../../../packages/contracts/src/index.js';
 import { getOpenOrders, type LedgerProjection } from '../../../packages/ledger/src/index.js';
 
@@ -25,15 +24,11 @@ function round(value: number, digits = 4): number {
   return Math.round(value * factor) / factor;
 }
 
-function sideMidpointReferencePrice(market: RuntimeMarket | null, side: 'yes' | 'no'): number | null {
+function sidePrice(market: RuntimeMarket | null, side: 'yes' | 'no'): number | null {
   if (!market) {
     return null;
   }
   return side === 'yes' ? market.yesPrice : market.noPrice;
-}
-
-function marketPriceSource(market: RuntimeMarket | null): RuntimeMarket['priceSource'] {
-  return market?.priceSource ?? RUNTIME_MIDPOINT_REFERENCE_PRICE_SOURCE;
 }
 
 function inferOutcomeSide(market: RuntimeMarket | null, tokenId: string): 'yes' | 'no' {
@@ -73,23 +68,11 @@ function summarizeExecution(state: ExecutionStateBasis, live: RuntimeLiveControl
     ? 'No ledger-backed trades have been recorded yet.'
     : `${counts.pending} pending, ${counts.reconcile} reconcile, ${counts.open} open, ${counts.closed} closed, ${counts.error} error.`;
 
-  const modeSummary = live.configured
-    ? live.armed
-      ? 'Live control plane is armed, but the live adapter is still unavailable, so venue writes stay blocked.'
-      : live.armable
-        ? 'Live control plane is configured but disarmed. Paper execution remains the only writer.'
-        : 'Live mode was requested, but process-level arming is disabled. Paper execution remains the only writer.'
-    : 'Paper execution remains the only writer.';
-
-  const killSwitchSummary = live.killSwitchActive
-    ? ` Global kill switch is active${live.killSwitchReason ? ` (${live.killSwitchReason})` : ''}.`
-    : '';
-
   const staleSummary = state.marketData.stale && (counts.pending > 0 || counts.reconcile > 0)
     ? ' Fresh quotes are required before pending or reconciling trades can advance.'
     : '';
 
-  return `${modeSummary} ${tradeSummary}${killSwitchSummary}${staleSummary}`.trim();
+  return `${live.summary} ${tradeSummary}${staleSummary}`.trim();
 }
 
 function collectTradeGroups(projection: LedgerProjection): TradeGroup[] {
@@ -134,11 +117,11 @@ function createTradeSummary(
   const filledQuantity = round(orders.reduce((sum, order) => sum + order.filledQuantity, 0), 6);
   const remainingQuantity = round(openOrders.reduce((sum, order) => sum + order.remainingQuantity, 0), 6);
   const positionQuantity = round(position?.netQuantity ?? 0, 6);
-  const referenceMarkPrice = sideMidpointReferencePrice(market, side);
+  const markPrice = sidePrice(market, side);
   const averageEntryPrice = position?.averageEntryPrice == null ? null : round(position.averageEntryPrice);
-  const unrealizedPnlUsd = referenceMarkPrice == null || !position || position.netQuantity <= EPSILON || position.averageEntryPrice == null
+  const unrealizedPnlUsd = markPrice == null || !position || position.netQuantity <= EPSILON || position.averageEntryPrice == null
     ? null
-    : round((referenceMarkPrice - position.averageEntryPrice) * position.netQuantity, 2);
+    : round((markPrice - position.averageEntryPrice) * position.netQuantity, 2);
   const realizedPnlUsd = position ? round(position.realizedPnl, 2) : fills.length > 0 ? 0 : null;
   const hasProjectionAnomaly = projection.anomalies.some((entry) => entry.includes(group.key) || entry.includes(group.marketId));
   const rejectionReason = orders.find((order) => order.rejectionReason)?.rejectionReason ?? null;
@@ -198,8 +181,7 @@ function createTradeSummary(
     remainingQuantity,
     positionQuantity,
     averageEntryPrice,
-    markPrice: referenceMarkPrice == null ? null : round(referenceMarkPrice),
-    markPriceSource: referenceMarkPrice == null ? undefined : marketPriceSource(market),
+    markPrice: markPrice == null ? null : round(markPrice),
     realizedPnlUsd,
     unrealizedPnlUsd,
     openedAt,

@@ -24,22 +24,14 @@ Read these as hard warnings, not suggestions:
 6. **Do not treat the UI as the source of truth.**
    The ledger and logs must explain what happened. If they cannot, stop the session.
 
-7. **Do not use the proxy setting to evade geographic restrictions.**
-   Any optional venue proxy must stay read-only, container-scoped, compliant with Polymarket access rules, and deployed with Docker Compose rather than host-level VPN changes.
-
 ## Preflight
 
 Before starting a session:
 
-- set a fresh `PHANTOM3_V2_CONTROL_TOKEN`
-- verify `PHANTOM3_V2_PUBLIC_BASE_URL` matches the actual access path
-- confirm `PHANTOM3_V2_DATA_DIR` and `PHANTOM3_V2_LOG_DIR` point to writable local storage
-- if `PHANTOM3_V2_POLYMARKET_PROXY_URL` is set, keep it scoped to read-only Polymarket market-data traffic only
-- set `PHANTOM3_V2_POLYMARKET_OPERATOR_ELIGIBILITY` to `confirmed-eligible` when reviewed, or `restricted` to fail closed
-- prefer `PHANTOM3_V2_REMOTE_DASHBOARD=false` unless remote access is truly needed
-- if you are using the container-only Mullvad flow, prepare the untracked WireGuard input with `./scripts/prepare-mullvad-wireguard-config.sh`
-- review `docs/runbooks/MULLVAD_WIREGUARD_CONTAINER_INPUTS.md` for the safe local input path
-- review `docs/runbooks/MULLVAD_SOCKS5_COMPOSE_RUNBOOK.md` and confirm exactly one local Mullvad conf is mounted read-only via Compose
+- set a fresh `WRAITH_CONTROL_TOKEN`
+- verify `WRAITH_PUBLIC_BASE_URL` matches the actual access path
+- confirm `WRAITH_DATA_DIR` and `WRAITH_LOG_DIR` point to writable local storage
+- prefer `WRAITH_REMOTE_DASHBOARD=false` unless remote access is truly needed
 - review `docs/milestones/PAPER_SAFE_STRATEGY_MILESTONE.md`
 - print or open `docs/qa/PAPER_SAFE_STRATEGY_CHECKLIST.md`
 
@@ -47,55 +39,18 @@ Before starting a session:
 
 ```bash
 cp .env.example .env
-# set a fresh PHANTOM3_V2_CONTROL_TOKEN before continuing
 npm install
-npm run runtime:preflight
-npm run verify:paper-runtime
-npm run verify:trading-preference
-npm run runtime:start
-npm run runtime:status
+npm run build:web
+npm run check
+npm run verify:paper-safe
+npm run start
 ```
-
-What the helper does:
-- loads `.env` from the repo root unless `PHANTOM3_V2_ENV_FILE` overrides it
-- writes pid and runtime logs under `PHANTOM3_V2_LOG_DIR`
-- rebuilds the dashboard before startup so the served UI matches the current checkout
-- checks `/api/health` instead of trusting a stale pid file
 
 Then confirm:
-- `npm run verify:paper-runtime` passed on the same commit you are about to run
-- `npm run verify:trading-preference` passed on the same commit you are about to run
 - `/api/health` returns healthy JSON
 - `/api/runtime` reports `mode: "paper"`
-- `/api/runtime` shows the expected Polymarket transport route and eligibility note
 - the runtime shows the execution path as blocked or disarmed
-- a selected legacy trading preference is labeled reference-only until parity work actually lands
 - unauthorized control requests fail with `401`
-
-Useful operator commands:
-
-```bash
-npm run runtime:logs
-npm run runtime:restart
-npm run runtime:stop
-```
-
-## Optional container-only Mullvad egress
-
-If you need the Mullvad SOCKS5 path for venue traffic:
-- use Docker Compose, not a host VPN or host-wide proxy settings
-- route only the application traffic that is explicitly configured for the SOCKS5 proxy
-- keep localhost and internal/private destinations on their direct path with `NO_PROXY` or equivalent client settings
-- select and mount exactly one Mullvad WireGuard conf from the provided bundle
-- follow `docs/runbooks/MULLVAD_SOCKS5_COMPOSE_RUNBOOK.md`
-
-If the Mullvad path is unhealthy, stop the proxied application container and investigate. Do not paper over it with host-level network changes.
-
-If you want the paper runtime to start at login on macOS, render the repo-aware launchd plist with:
-
-```bash
-npm run runtime:launchd:print > ~/Library/LaunchAgents/io.phantom3.v2.paper-runtime.plist
-```
 
 ## During a supervised paper session
 

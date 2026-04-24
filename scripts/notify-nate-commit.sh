@@ -54,7 +54,7 @@ if [[ -n "$commit_url" ]]; then
 $commit_url"
 fi
 
-if [[ "${PHANTOM3_NOTIFY_DRY_RUN:-0}" == "1" ]]; then
+if [[ "${WRAITH_NOTIFY_DRY_RUN:-0}" == "1" ]]; then
   print -r -- "$message"
   exit 0
 fi

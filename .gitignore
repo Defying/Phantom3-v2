@@ -3,9 +3,4 @@ logs/
 data/
 apps/web/dist/
 .env
-docker-compose*.local.yml
-.secrets/
 .DS_Store
-docker/mullvad/input/*.conf
-!docker/mullvad/input/example-mullvad-wg.conf
-docker/mullvad/input/*.zip

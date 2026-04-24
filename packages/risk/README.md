@@ -1,6 +1,6 @@
-# `@phantom3-v2/risk`
+# `@wraith/risk`
 
-Pure paper-trading risk evaluation for Phantom3 v2.
+Pure paper-trading risk evaluation for Wraith.
 
 ## What it does
 
@@ -9,7 +9,6 @@ The module evaluates a `TradeIntent` against a normalized market snapshot, curre
 It can:
 - block when kill switches or cooldowns are active
 - reject stale quotes, wide spreads, thin liquidity, or low volume
-- require executable best ask/bid quotes for paper approvals; midpoint stays reference-only
 - enforce max order size, simultaneous position count, per-market caps, and total exposure caps
 - resize paper orders down to the allowed size when a cap is hit
 - allow reduce-only intents to pass through operator blocks when configured
@@ -41,7 +40,6 @@ const decision = evaluatePaperTradeRisk({
     marketId: 'market-123',
     bestBid: 0.48,
     bestAsk: 0.5,
-    midpoint: 0.49, // reference-only context; approvals still require the executable bid/ask above
     liquidityUsd: 5000,
     volume24hrUsd: 12000,
     observedAt: new Date().toISOString()

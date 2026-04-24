@@ -6,9 +6,10 @@ remote_name="${2:-origin}"
 refs_file="${3:-}"
 
 repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+git_common_dir=$(git rev-parse --git-common-dir 2>/dev/null) || exit 0
 cd "$repo_root" || exit 0
 notify_script="$repo_root/scripts/notify-nate-commit.sh"
-state_file="$repo_root/.git/notify-nate-pushed.log"
+state_file="$git_common_dir/notify-nate-pushed.log"
 branch_filter=$(git config --local --get notify.nateBranches 2>/dev/null || true)
 
 normalize_branch_name() {
@@ -111,7 +112,7 @@ mark_notified() {
   print -r -- "$key" >> "$state_file"
 }
 
-if [[ "${PHANTOM3_NOTIFY_SKIP_WAIT:-0}" != "1" ]]; then
+if [[ "${WRAITH_NOTIFY_SKIP_WAIT:-0}" != "1" ]]; then
   [[ -n "$git_pid" ]] || exit 0
   wait_for_push_to_finish "$git_pid" || exit 0
 fi
@@ -123,7 +124,7 @@ while read -r local_ref local_sha remote_ref remote_sha; do
   [[ -n "${local_ref:-}" ]] || continue
   [[ "$local_sha" != "0000000000000000000000000000000000000000" ]] || continue
 
-  if [[ "${PHANTOM3_NOTIFY_SKIP_REMOTE_CHECK:-0}" != "1" ]]; then
+  if [[ "${WRAITH_NOTIFY_SKIP_REMOTE_CHECK:-0}" != "1" ]]; then
     remote_ref_matches "$remote_name" "$remote_ref" "$local_sha" || continue
   fi
 

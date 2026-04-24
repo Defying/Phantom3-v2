@@ -1,4 +1,4 @@
-import { createHmac, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import {
   LEDGER_EPSILON,
@@ -20,7 +20,6 @@ import {
   type PositionUpdatedEvent,
   type ProjectedOrder
 } from '../../ledger/src/index.js';
-import { OutboundTransport, OutboundTransportError } from '../../transport/src/index.js';
 
 export const liveExecutionConfigSchema = z.object({
   enabled: z.boolean().default(false),
@@ -99,6 +98,16 @@ export const liveVenueFillSchema = z.object({
 });
 export type LiveVenueFill = z.infer<typeof liveVenueFillSchema>;
 
+export const liveVenuePositionSnapshotSchema = z.object({
+  observedAt: z.string().min(1).optional(),
+  marketId: z.string().min(1),
+  tokenId: z.string().min(1),
+  quantity: z.number().nonnegative().finite(),
+  ambiguous: z.boolean().optional(),
+  raw: z.record(z.string(), z.unknown()).optional()
+});
+export type LiveVenuePositionSnapshot = z.infer<typeof liveVenuePositionSnapshotSchema>;
+
 export const liveSubmitResultSchema = z.object({
   transportStatus: z.enum(['acknowledged', 'rejected', 'ambiguous']).default('acknowledged'),
   order: liveVenueOrderSnapshotSchema.optional(),
@@ -114,7 +123,8 @@ const liveVenueSnapshotOrderInputSchema = liveVenueOrderSnapshotBaseSchema.exten
 export const liveVenueStateSnapshotSchema = z.object({
   observedAt: z.string().min(1),
   orders: z.array(liveVenueSnapshotOrderInputSchema),
-  fills: z.array(liveVenueFillSchema).default([])
+  fills: z.array(liveVenueFillSchema).default([]),
+  positions: z.array(liveVenuePositionSnapshotSchema).default([])
 });
 export type LiveVenueStateSnapshot = z.infer<typeof liveVenueStateSnapshotSchema>;
 
@@ -147,6 +157,15 @@ export type LiveReconciliationResult = {
   unmatchedVenueOrderIds: string[];
   unmatchedVenueFillIds: string[];
   skippedReason?: string;
+};
+
+export type LiveStartupReconciliationResult = LiveReconciliationResult & {
+  clean: boolean;
+  reasons: string[];
+  trackedLiveOrderIds: string[];
+  trackedLivePositionKeys: string[];
+  positionMismatchKeys: string[];
+  unmatchedVenuePositionKeys: string[];
 };
 
 const DEFAULTS = liveExecutionConfigSchema.parse({});
@@ -286,28 +305,13 @@ export class LiveExecutionAdapter {
 
   async reconcileVenueSnapshot(input: LiveVenueStateSnapshot): Promise<LiveReconciliationResult> {
     const snapshot = liveVenueStateSnapshotSchema.parse(input);
-    const projection = await this.ledger.readProjection();
-    const activeOrders = getActiveOrders(projection);
-
     if (!this.isTimestampFresh(snapshot.observedAt, this.maxReconcileAgeMs)) {
-      const envelopes: LedgerEnvelope[] = [];
-      const reconcileRequiredOrderIds: string[] = [];
-
-      for (const activeOrder of activeOrders) {
-        const staleResult = await this.markOrderForReconcile(
-          activeOrder.orderId,
-          `Venue snapshot ${snapshot.observedAt} is older than ${this.maxReconcileAgeMs}ms.`
-        );
-        envelopes.push(...staleResult.envelopes);
-        reconcileRequiredOrderIds.push(activeOrder.orderId);
-      }
-
       return {
         observedAt: snapshot.observedAt,
-        envelopes,
-        reconciledOrderIds: reconcileRequiredOrderIds,
+        envelopes: [],
+        reconciledOrderIds: [],
         filledOrderIds: [],
-        reconcileRequiredOrderIds,
+        reconcileRequiredOrderIds: [],
         unmatchedVenueOrderIds: [],
         unmatchedVenueFillIds: [],
         skippedReason: `Venue snapshot ${snapshot.observedAt} is older than ${this.maxReconcileAgeMs}ms.`
@@ -319,6 +323,8 @@ export class LiveExecutionAdapter {
       observedAt: order.observedAt ?? snapshot.observedAt
     }));
     const fills = snapshot.fills.map((fill) => liveVenueFillSchema.parse(fill));
+    const projection = await this.ledger.readProjection();
+    const activeOrders = getActiveOrders(projection, { executionMode: 'live' });
     const envelopes: LedgerEnvelope[] = [];
     const reconciledOrderIds: string[] = [];
     const filledOrderIds: string[] = [];
@@ -377,80 +383,12 @@ export class LiveExecutionAdapter {
       }
     }
 
-    const activeOrderIds = new Set(activeOrders.map((order) => order.orderId));
-    const inactiveTrackedOrders = [...projection.orders.values()].filter((order) => !activeOrderIds.has(order.orderId));
-
-    for (const trackedOrder of inactiveTrackedOrders) {
-      const matches = orders.filter((candidate) => this.matchesTrackedOrder(trackedOrder, candidate));
-
-      if (matches.length === 0) {
-        continue;
-      }
-
-      if (matches.length > 1) {
-        const duplicateResult = await this.markOrderForReconcile(
-          trackedOrder.orderId,
-          `Venue snapshot contains multiple candidate orders for tracked order ${trackedOrder.orderId}.`
-        );
-        envelopes.push(...duplicateResult.envelopes);
-        reconciledOrderIds.push(trackedOrder.orderId);
-        reconcileRequiredOrderIds.push(trackedOrder.orderId);
-        continue;
-      }
-
-      const matchedOrder = matches[0]!;
-      matchedOrderKeys.add(this.snapshotOrderKey(matchedOrder));
-      const matchedFills = fills.filter((fill) => this.matchesTrackedFill(trackedOrder, matchedOrder, fill));
-      for (const fill of matchedFills) {
-        matchedVenueFillIds.add(fill.venueFillId);
-      }
-
-      const result = await this.reconcileTrackedOrder({
-        orderId: trackedOrder.orderId,
-        venueOrder: matchedOrder,
-        venueFills: matchedFills,
-        forcedReconcileReason:
-          trackedOrder.status === 'canceled' || trackedOrder.status === 'rejected'
-            ? `Venue still reports order activity after local status ${trackedOrder.status}.`
-            : undefined
-      });
-
-      envelopes.push(...result.envelopes);
-      reconciledOrderIds.push(trackedOrder.orderId);
-      if (result.fillEvents.length > 0) {
-        filledOrderIds.push(trackedOrder.orderId);
-      }
-      if (result.orderEvent.status === 'reconcile') {
-        reconcileRequiredOrderIds.push(trackedOrder.orderId);
-      }
-    }
-
     const unmatchedVenueOrderIds = orders
       .filter((order) => !matchedOrderKeys.has(this.snapshotOrderKey(order)))
       .map((order) => order.venueOrderId ?? order.clientOrderId ?? '(unknown-order)');
     const unmatchedVenueFillIds = fills
       .filter((fill) => !matchedVenueFillIds.has(fill.venueFillId))
       .map((fill) => fill.venueFillId);
-
-    if (unmatchedVenueOrderIds.length > 0 || unmatchedVenueFillIds.length > 0) {
-      const automaticKillSwitchNote = this.buildAutomaticKillSwitchNote({
-        observedAt: snapshot.observedAt,
-        unmatchedVenueOrderIds,
-        unmatchedVenueFillIds
-      });
-
-      if (!projection.killSwitch.active || projection.killSwitch.reason !== automaticKillSwitchNote) {
-        envelopes.push(...await this.engageKillSwitch({
-          sessionId: 'live-reconciliation',
-          note: automaticKillSwitchNote,
-          metadata: {
-            observedAt: snapshot.observedAt,
-            unmatchedVenueOrderIds,
-            unmatchedVenueFillIds
-          }
-        }));
-      }
-    }
 
     return {
       observedAt: snapshot.observedAt,
@@ -460,6 +398,99 @@ export class LiveExecutionAdapter {
       reconcileRequiredOrderIds,
       unmatchedVenueOrderIds,
       unmatchedVenueFillIds
+    };
+  }
+
+  async reconcileStartupState(input: LiveVenueStateSnapshot): Promise<LiveStartupReconciliationResult> {
+    const snapshot = liveVenueStateSnapshotSchema.parse(input);
+    const positions = snapshot.positions.map((position) => liveVenuePositionSnapshotSchema.parse({
+      ...position,
+      observedAt: position.observedAt ?? snapshot.observedAt
+    }));
+    const startupReasons = new Set<string>();
+    const venuePositions = new Map<string, LiveVenuePositionSnapshot>();
+
+    for (const position of positions) {
+      const key = positionKeyFor(position.marketId, position.tokenId);
+      const observedAt = position.observedAt ?? snapshot.observedAt;
+
+      if (venuePositions.has(key)) {
+        startupReasons.add(`Venue position snapshot contains multiple entries for ${key}.`);
+        continue;
+      }
+      if (!this.isTimestampFresh(observedAt, this.maxReconcileAgeMs)) {
+        startupReasons.add(`Venue position snapshot for ${key} is older than ${this.maxReconcileAgeMs}ms.`);
+      }
+      if (position.ambiguous && this.failClosedOnAmbiguousState) {
+        startupReasons.add(`Venue position ${key} was flagged ambiguous by the exchange adapter.`);
+      }
+      venuePositions.set(key, position);
+    }
+
+    const reconciliation = await this.reconcileVenueSnapshot(snapshot);
+    if (reconciliation.skippedReason) {
+      startupReasons.add(reconciliation.skippedReason);
+    }
+    if (reconciliation.reconcileRequiredOrderIds.length > 0) {
+      startupReasons.add(`Live order reconciliation is still required for ${reconciliation.reconcileRequiredOrderIds.join(', ')}.`);
+    }
+    if (reconciliation.unmatchedVenueOrderIds.length > 0) {
+      startupReasons.add(`Venue snapshot exposed unmatched live orders: ${reconciliation.unmatchedVenueOrderIds.join(', ')}.`);
+    }
+    if (reconciliation.unmatchedVenueFillIds.length > 0) {
+      startupReasons.add(`Venue snapshot exposed unmatched live fills: ${reconciliation.unmatchedVenueFillIds.join(', ')}.`);
+    }
+
+    const projection = await this.ledger.readProjection();
+    const trackedLiveOrders = getActiveOrders(projection, { executionMode: 'live' });
+    if (projection.anomalies.length > 0) {
+      for (const anomaly of projection.anomalies) {
+        startupReasons.add(anomaly);
+      }
+    }
+    const trackedLivePositions = [...projection.positions.values()]
+      .filter((position) => position.executionMode === 'live' && position.netQuantity > LEDGER_EPSILON);
+    const positionMismatchKeys: string[] = [];
+    const unmatchedVenuePositionKeys: string[] = [];
+    const matchedPositionKeys = new Set<string>();
+
+    for (const position of trackedLivePositions) {
+      const key = position.positionId;
+      const venuePosition = venuePositions.get(key);
+      if (!venuePosition) {
+        positionMismatchKeys.push(key);
+        startupReasons.add(`Tracked live position ${key} is missing from the venue position snapshot.`);
+        continue;
+      }
+
+      matchedPositionKeys.add(key);
+      if (Math.abs(position.netQuantity - venuePosition.quantity) > LEDGER_EPSILON) {
+        positionMismatchKeys.push(key);
+        startupReasons.add(
+          `Venue position ${key} reports ${venuePosition.quantity}, but the ledger projects ${position.netQuantity}.`
+        );
+      }
+    }
+
+    for (const [key, venuePosition] of venuePositions.entries()) {
+      if (matchedPositionKeys.has(key)) {
+        continue;
+      }
+      if (venuePosition.quantity <= LEDGER_EPSILON) {
+        continue;
+      }
+      unmatchedVenuePositionKeys.push(key);
+      startupReasons.add(`Venue position ${key} still holds ${venuePosition.quantity}, but the ledger is flat.`);
+    }
+
+    return {
+      ...reconciliation,
+      clean: startupReasons.size === 0,
+      reasons: [...startupReasons],
+      trackedLiveOrderIds: trackedLiveOrders.map((order) => order.orderId),
+      trackedLivePositionKeys: trackedLivePositions.map((position) => position.positionId),
+      positionMismatchKeys,
+      unmatchedVenuePositionKeys
     };
   }
 
@@ -483,28 +514,6 @@ export class LiveExecutionAdapter {
     note?: string;
     metadata?: Record<string, unknown>;
   }): Promise<LedgerEnvelope[]> {
-    const projection = await this.ledger.readProjection();
-    const activeOrders = getActiveOrders(projection);
-    const openPositions = [...projection.positions.values()].filter((position) => position.netQuantity > LEDGER_EPSILON);
-
-    if (projection.killSwitch.active && (activeOrders.length > 0 || openPositions.length > 0 || projection.anomalies.length > 0)) {
-      const blockers: string[] = [];
-
-      if (activeOrders.length > 0) {
-        blockers.push(`${activeOrders.length} active order${activeOrders.length === 1 ? '' : 's'}`);
-      }
-      if (openPositions.length > 0) {
-        blockers.push(`${openPositions.length} open position${openPositions.length === 1 ? '' : 's'}`);
-      }
-      if (projection.anomalies.length > 0) {
-        blockers.push(`${projection.anomalies.length} projection anomal${projection.anomalies.length === 1 ? 'y' : 'ies'}`);
-      }
-
-      throw new Error(
-        `Cannot release the live kill switch while unresolved state remains: ${blockers.join(', ')}.`
-      );
-    }
-
     return this.ledger.append(
       this.buildOperatorActionEvent({
         sessionId: input.sessionId,
@@ -528,16 +537,15 @@ export class LiveExecutionAdapter {
 
     const quote = paperQuoteSchema.parse(input.quote);
     const projection = await this.ledger.readProjection();
-    const blockingEntryOrders = getActiveOrders(projection, { marketId: input.marketId, tokenId: input.tokenId })
+    const workingBuyOrders = getActiveOrders(projection, { executionMode: 'live', marketId: input.marketId, tokenId: input.tokenId })
       .filter((order) => order.side === 'buy');
-
-    if (blockingEntryOrders.length > 0) {
+    if (workingBuyOrders.length > 0) {
       throw new Error(
-        `Cannot flatten ${input.marketId}/${input.tokenId} while ${blockingEntryOrders.length} same-market live buy order${blockingEntryOrders.length === 1 ? '' : 's'} still remain active.`
+        `Cannot flatten while ${workingBuyOrders.length} working buy order${workingBuyOrders.length === 1 ? ' still needs' : 's still need'} reconciliation for ${input.marketId}/${input.tokenId}. Cancel or reconcile entry orders first.`
       );
     }
 
-    const position = projection.positions.get(positionKeyFor(input.marketId, input.tokenId));
+    const position = this.projectedLivePosition(projection, input.marketId, input.tokenId);
     const reservedSellQuantity = this.getReservedSellQuantity(projection, input.marketId, input.tokenId);
     const quantity = Math.max(0, (position?.netQuantity ?? 0) - reservedSellQuantity);
 
@@ -765,7 +773,7 @@ export class LiveExecutionAdapter {
     const fillEvents: FillRecordedEvent[] = [];
     const positionEvents: PositionUpdatedEvent[] = [];
     const ledgerEvents: PaperLedgerEvent[] = [];
-    let currentPosition = projection.positions.get(positionKeyFor(localOrder.marketId, localOrder.tokenId));
+    let currentPosition = this.projectedLivePosition(projection, localOrder.marketId, localOrder.tokenId);
 
     for (const fill of newVenueFills) {
       const fillEvent = this.buildLiveFillEvent({
@@ -820,14 +828,6 @@ export class LiveExecutionAdapter {
     });
 
     ledgerEvents.push(orderEvent);
-    if (reasons.size > 0 && !projection.killSwitch.active) {
-      ledgerEvents.push(this.buildAutomaticKillSwitchEvent({
-        sessionId: localOrder.sessionId,
-        targetOrderId: localOrder.orderId,
-        note: [...reasons].join(' | ')
-      }));
-    }
-
     const envelopes = await this.ledger.append(ledgerEvents);
     return {
       envelopes,
@@ -863,16 +863,7 @@ export class LiveExecutionAdapter {
       metadata: order.metadata
     });
 
-    const events: PaperLedgerEvent[] = [orderEvent];
-    if (!projection.killSwitch.active) {
-      events.push(this.buildAutomaticKillSwitchEvent({
-        sessionId: order.sessionId,
-        targetOrderId: order.orderId,
-        note: reason
-      }));
-    }
-
-    const envelopes = await this.ledger.append(events);
+    const envelopes = await this.ledger.append(orderEvent);
     return {
       envelopes,
       orderEvent,
@@ -889,13 +880,6 @@ export class LiveExecutionAdapter {
       return `Live kill switch is active${projection.killSwitch.reason ? `: ${projection.killSwitch.reason}` : '.'}`;
     }
 
-    if (!intent.reduceOnly) {
-      const reconcileRequired = [...projection.orders.values()].some((order) => order.status === 'reconcile');
-      if (reconcileRequired || projection.anomalies.length > 0) {
-        return 'Live reconciliation is required before new non-reduce-only intents can be submitted.';
-      }
-    }
-
     if (intent.reduceOnly && intent.side !== 'sell') {
       return 'reduceOnly live intents must be sell orders in the current long-only position model.';
     }
@@ -905,7 +889,7 @@ export class LiveExecutionAdapter {
     }
 
     const reservedSellQuantity = this.getReservedSellQuantity(projection, intent.marketId, intent.tokenId);
-    const position = projection.positions.get(positionKeyFor(intent.marketId, intent.tokenId));
+    const position = this.projectedLivePosition(projection, intent.marketId, intent.tokenId);
     const availableToSell = Math.max(0, (position?.netQuantity ?? 0) - reservedSellQuantity);
 
     if (availableToSell + LEDGER_EPSILON < intent.quantity) {
@@ -920,7 +904,7 @@ export class LiveExecutionAdapter {
     marketId: string,
     tokenId: string
   ): number {
-    return getActiveOrders(projection, { marketId, tokenId })
+    return getActiveOrders(projection, { executionMode: 'live', marketId, tokenId })
       .filter((order) => order.side === 'sell')
       .reduce((sum, order) => sum + order.remainingQuantity, 0);
   }
@@ -1121,26 +1105,6 @@ export class LiveExecutionAdapter {
     };
   }
 
-  private buildAutomaticKillSwitchEvent(args: {
-    sessionId: string;
-    targetOrderId?: string;
-    targetPositionId?: string;
-    note: string;
-    metadata?: Record<string, unknown>;
-  }): OperatorActionEvent {
-    return this.buildOperatorActionEvent({
-      sessionId: args.sessionId,
-      action: 'kill-switch-engaged',
-      targetOrderId: args.targetOrderId,
-      targetPositionId: args.targetPositionId,
-      note: args.note,
-      metadata: {
-        automatic: true,
-        ...(args.metadata ?? {})
-      }
-    });
-  }
-
   private mapVenueStatus(status: LiveVenueOrderStatus, filledQuantity: number, remainingQuantity: number): OrderStatus {
     switch (status) {
       case 'pending':
@@ -1184,6 +1148,15 @@ export class LiveExecutionAdapter {
     return false;
   }
 
+  private projectedLivePosition(
+    projection: Awaited<ReturnType<JsonlLedger['readProjection']>>,
+    marketId: string,
+    tokenId: string
+  ) {
+    const position = projection.positions.get(positionKeyFor(marketId, tokenId));
+    return position?.executionMode === 'live' ? position : undefined;
+  }
+
   private shouldAllowMissingOrder(order: ProjectedOrder, observedAt: string): boolean {
     if (!this.isTimestampFresh(observedAt, this.maxReconcileAgeMs)) {
       return false;
@@ -1193,29 +1166,6 @@ export class LiveExecutionAdapter {
 
   private snapshotOrderKey(order: LiveVenueOrderSnapshot): string {
     return order.venueOrderId ?? order.clientOrderId ?? `${order.marketId}:${order.tokenId}:${order.side}:${order.limitPrice}:${order.requestedQuantity}`;
-  }
-
-  private buildAutomaticKillSwitchNote(input: {
-    observedAt: string;
-    unmatchedVenueOrderIds: string[];
-    unmatchedVenueFillIds: string[];
-  }): string {
-    const reasons: string[] = [];
-
-    if (input.unmatchedVenueOrderIds.length > 0) {
-      reasons.push(`unmatched venue orders ${this.previewIds(input.unmatchedVenueOrderIds)}`);
-    }
-
-    if (input.unmatchedVenueFillIds.length > 0) {
-      reasons.push(`unmatched venue fills ${this.previewIds(input.unmatchedVenueFillIds)}`);
-    }
-
-    return `Automatic live kill switch at ${input.observedAt}: ${reasons.join('; ')}. Manual reconciliation is required before new entries.`;
-  }
-
-  private previewIds(values: readonly string[], limit = 3): string {
-    const visible = values.slice(0, limit).join(', ');
-    return values.length > limit ? `${visible}, +${values.length - limit} more` : visible;
   }
 
   private sumFillQuantity(fills: readonly FillRecordedEvent[]): number {
@@ -1281,371 +1231,6 @@ export class LiveExecutionAdapter {
 
   private nowIso(): string {
     return this.clock().toISOString();
-  }
-}
-
-const POLYMARKET_CLOB_HOST = 'https://clob.polymarket.com';
-const POLYMARKET_USER_AGENT = 'Phantom3-v2/0.1';
-const POLYMARKET_FIXED_DECIMALS = 1_000_000;
-export const DEFAULT_POLYMARKET_SUBMIT_BLOCKED_REASON = 'Polymarket live submission stays fail-closed because this repo does not yet have an EIP-712 order signer / signed-order builder for venue orders.';
-
-export const polymarketL2CredentialsSchema = z.object({
-  address: z.string().trim().regex(/^0x[a-fA-F0-9]{40}$/, 'Polymarket address must be a 0x-prefixed 40-hex wallet address.'),
-  apiKey: z.string().trim().min(1),
-  secret: z.string().trim().min(1),
-  passphrase: z.string().trim().min(1)
-});
-export type PolymarketL2Credentials = z.infer<typeof polymarketL2CredentialsSchema>;
-
-const polymarketOpenOrderStatusSchema = z.enum([
-  'ORDER_STATUS_LIVE',
-  'ORDER_STATUS_INVALID',
-  'ORDER_STATUS_CANCELED_MARKET_RESOLVED',
-  'ORDER_STATUS_CANCELED',
-  'ORDER_STATUS_MATCHED'
-]);
-export type PolymarketOpenOrderStatus = z.infer<typeof polymarketOpenOrderStatusSchema>;
-
-export const polymarketOpenOrderSchema = z.object({
-  id: z.string().min(1),
-  status: polymarketOpenOrderStatusSchema,
-  owner: z.string().min(1).optional(),
-  maker_address: z.string().min(1).optional(),
-  market: z.string().min(1),
-  asset_id: z.string().min(1),
-  side: z.enum(['BUY', 'SELL']),
-  original_size: z.union([z.string().min(1), z.number().finite()]),
-  size_matched: z.union([z.string().min(1), z.number().finite()]),
-  price: z.union([z.string().min(1), z.number().finite()]),
-  outcome: z.string().min(1).nullable().optional(),
-  expiration: z.union([z.string().min(1), z.number().finite()]),
-  order_type: z.string().min(1).optional(),
-  associate_trades: z.array(z.string()).default([]),
-  created_at: z.union([z.string().min(1), z.number().finite()])
-}).passthrough();
-export type PolymarketOpenOrder = z.infer<typeof polymarketOpenOrderSchema>;
-
-const polymarketOrdersResponseSchema = z.object({
-  limit: z.number().int().nonnegative().default(0),
-  next_cursor: z.string().default(''),
-  count: z.number().int().nonnegative().default(0),
-  data: z.array(polymarketOpenOrderSchema)
-}).passthrough();
-
-export const polymarketCancelOrdersResponseSchema = z.object({
-  canceled: z.array(z.string()),
-  not_canceled: z.record(z.string(), z.unknown())
-}).passthrough();
-export type PolymarketCancelOrdersResponse = z.infer<typeof polymarketCancelOrdersResponseSchema>;
-
-export const polymarketHeartbeatResponseSchema = z.object({
-  heartbeat_id: z.string().min(1),
-  error_msg: z.string().min(1).optional()
-}).passthrough();
-export type PolymarketHeartbeatResponse = z.infer<typeof polymarketHeartbeatResponseSchema>;
-
-export type PolymarketL2Method = 'GET' | 'POST' | 'DELETE';
-
-export type PolymarketL2HeaderOptions = {
-  credentials: PolymarketL2Credentials;
-  method: PolymarketL2Method;
-  requestPath: string;
-  body?: string;
-  timestamp?: number;
-};
-
-export type PolymarketClobClientOptions = {
-  credentials: PolymarketL2Credentials;
-  host?: string;
-  transport?: OutboundTransport;
-  clock?: () => Date;
-};
-
-export type PolymarketOpenOrderFilters = {
-  id?: string;
-  market?: string;
-  assetId?: string;
-};
-
-export type TrackedVenueOrderRef = Pick<ProjectedOrder, 'orderId' | 'venueOrderId'>;
-
-function trimTrailingSlash(value: string): string {
-  return value.endsWith('/') ? value.slice(0, -1) : value;
-}
-
-function toFiniteNumber(value: string | number, label: string): number {
-  const parsed = typeof value === 'number' ? value : Number(value);
-  if (!Number.isFinite(parsed)) {
-    throw new Error(`${label} must be a finite number.`);
-  }
-  return parsed;
-}
-
-function parsePolymarketQuantity(value: string | number, label: string): number {
-  return toFiniteNumber(value, label) / POLYMARKET_FIXED_DECIMALS;
-}
-
-function parsePolymarketProbability(value: string | number, label: string): number {
-  const parsed = toFiniteNumber(value, label);
-  if (parsed < 0 || parsed > 1) {
-    throw new Error(`${label} must be between 0 and 1.`);
-  }
-  return parsed;
-}
-
-function parseEpochToIso(value: string | number, label: string): string {
-  const parsed = toFiniteNumber(value, label);
-  const milliseconds = parsed >= 1_000_000_000_000 ? parsed : parsed * 1000;
-  const iso = new Date(milliseconds).toISOString();
-  if (Number.isNaN(Date.parse(iso))) {
-    throw new Error(`${label} could not be converted into an ISO timestamp.`);
-  }
-  return iso;
-}
-
-function appendQuery(url: string, query: Record<string, string | undefined>): string {
-  const entries = Object.entries(query).filter(([, value]) => value != null && value.length > 0);
-  if (entries.length === 0) {
-    return url;
-  }
-
-  const search = new URLSearchParams();
-  for (const [key, value] of entries) {
-    search.set(key, value!);
-  }
-  return `${url}?${search.toString()}`;
-}
-
-function isNotFoundError(error: unknown): error is OutboundTransportError {
-  return error instanceof OutboundTransportError && error.status === 404;
-}
-
-export function buildPolymarketL2Headers(args: PolymarketL2HeaderOptions): Record<string, string> {
-  const credentials = polymarketL2CredentialsSchema.parse(args.credentials);
-  if (!args.requestPath.startsWith('/')) {
-    throw new Error(`Polymarket requestPath must start with "/": ${args.requestPath}`);
-  }
-
-  const timestamp = args.timestamp ?? Math.floor(Date.now() / 1000);
-  const message = `${timestamp}${args.method}${args.requestPath}${args.body ?? ''}`;
-  const signature = createHmac('sha256', Buffer.from(credentials.secret, 'base64'))
-    .update(message)
-    .digest('base64')
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_');
-
-  return {
-    POLY_ADDRESS: credentials.address,
-    POLY_SIGNATURE: signature,
-    POLY_TIMESTAMP: `${timestamp}`,
-    POLY_API_KEY: credentials.apiKey,
-    POLY_PASSPHRASE: credentials.passphrase
-  };
-}
-
-function mapPolymarketOrderStatus(order: PolymarketOpenOrder, filledQuantity: number): LiveVenueOrderStatus {
-  switch (order.status) {
-    case 'ORDER_STATUS_LIVE':
-      return filledQuantity > LEDGER_EPSILON ? 'partially-filled' : 'open';
-    case 'ORDER_STATUS_MATCHED':
-      return 'filled';
-    case 'ORDER_STATUS_CANCELED':
-    case 'ORDER_STATUS_CANCELED_MARKET_RESOLVED':
-      return 'canceled';
-    case 'ORDER_STATUS_INVALID':
-      return 'rejected';
-    default:
-      return 'unknown';
-  }
-}
-
-export function mapPolymarketOpenOrderToLiveSnapshot(input: {
-  order: PolymarketOpenOrder;
-  observedAt: string;
-  clientOrderId?: string | null;
-}): LiveVenueOrderSnapshot {
-  const order = polymarketOpenOrderSchema.parse(input.order);
-  const requestedQuantity = parsePolymarketQuantity(order.original_size, `Polymarket order ${order.id} original_size`);
-  const filledQuantity = parsePolymarketQuantity(order.size_matched, `Polymarket order ${order.id} size_matched`);
-  const acknowledgedAt = parseEpochToIso(order.created_at, `Polymarket order ${order.id} created_at`);
-
-  return liveVenueOrderSnapshotSchema.parse({
-    observedAt: input.observedAt,
-    venueOrderId: order.id,
-    clientOrderId: input.clientOrderId ?? null,
-    marketId: order.market,
-    tokenId: order.asset_id,
-    side: order.side === 'BUY' ? 'buy' : 'sell',
-    limitPrice: parsePolymarketProbability(order.price, `Polymarket order ${order.id} price`),
-    requestedQuantity,
-    filledQuantity,
-    remainingQuantity: Math.max(0, requestedQuantity - filledQuantity),
-    status: mapPolymarketOrderStatus(order, filledQuantity),
-    acknowledgedAt,
-    updatedAt: input.observedAt,
-    raw: order
-  });
-}
-
-export class PolymarketClobClient {
-  private readonly credentials: PolymarketL2Credentials;
-  private readonly host: string;
-  private readonly transport: OutboundTransport;
-  private readonly clock: () => Date;
-
-  constructor(options: PolymarketClobClientOptions) {
-    this.credentials = polymarketL2CredentialsSchema.parse(options.credentials);
-    this.host = trimTrailingSlash(options.host ?? POLYMARKET_CLOB_HOST);
-    this.transport = options.transport ?? new OutboundTransport();
-    this.clock = options.clock ?? (() => new Date());
-  }
-
-  async getOrder(orderId: string): Promise<PolymarketOpenOrder> {
-    if (orderId.trim().length === 0) {
-      throw new Error('Polymarket orderId must not be empty.');
-    }
-    return polymarketOpenOrderSchema.parse(await this.authedGet(`/order/${orderId}`));
-  }
-
-  async getOpenOrders(filters: PolymarketOpenOrderFilters = {}): Promise<PolymarketOpenOrder[]> {
-    const orders: PolymarketOpenOrder[] = [];
-    let nextCursor: string | undefined;
-
-    do {
-      const response = polymarketOrdersResponseSchema.parse(await this.authedGet('/data/orders', {
-        id: filters.id,
-        market: filters.market,
-        asset_id: filters.assetId,
-        next_cursor: nextCursor
-      }));
-      orders.push(...response.data);
-      nextCursor = response.next_cursor.length > 0 ? response.next_cursor : undefined;
-    } while (nextCursor);
-
-    return orders;
-  }
-
-  async cancelOrder(orderId: string): Promise<PolymarketCancelOrdersResponse> {
-    return polymarketCancelOrdersResponseSchema.parse(await this.authedDelete('/order', {
-      orderID: orderId
-    }));
-  }
-
-  async sendHeartbeat(heartbeatId = ''): Promise<PolymarketHeartbeatResponse> {
-    return polymarketHeartbeatResponseSchema.parse(await this.authedPost('/v1/heartbeats', {
-      heartbeat_id: heartbeatId
-    }));
-  }
-
-  private authHeaders(method: PolymarketL2Method, path: string, body?: string): Record<string, string> {
-    const headers: Record<string, string> = {
-      accept: 'application/json',
-      'user-agent': POLYMARKET_USER_AGENT,
-      ...buildPolymarketL2Headers({
-        credentials: this.credentials,
-        method,
-        requestPath: path,
-        body,
-        timestamp: Math.floor(this.clock().getTime() / 1000)
-      })
-    };
-
-    if (body !== undefined) {
-      headers['content-type'] = 'application/json';
-    }
-
-    return headers;
-  }
-
-  private async authedGet<T>(path: string, query: Record<string, string | undefined> = {}): Promise<T> {
-    return this.transport.getJson<T>(appendQuery(`${this.host}${path}`, query), {
-      headers: this.authHeaders('GET', path)
-    });
-  }
-
-  private async authedPost<T>(path: string, body: unknown): Promise<T> {
-    const jsonBody = JSON.stringify(body);
-    return this.transport.postJson<T>(`${this.host}${path}`, body, {
-      headers: this.authHeaders('POST', path, jsonBody)
-    });
-  }
-
-  private async authedDelete<T>(path: string, body: unknown): Promise<T> {
-    const jsonBody = JSON.stringify(body);
-    return this.transport.deleteJson<T>(`${this.host}${path}`, body, {
-      headers: this.authHeaders('DELETE', path, jsonBody)
-    });
-  }
-}
-
-export async function buildPolymarketTrackedVenueStateSnapshot(input: {
-  client: Pick<PolymarketClobClient, 'getOrder'>;
-  trackedOrders: readonly TrackedVenueOrderRef[];
-  observedAt?: string;
-  ignoreMissingVenueOrders?: boolean;
-}): Promise<LiveVenueStateSnapshot> {
-  const observedAt = input.observedAt ?? new Date().toISOString();
-  const resolvedOrders = await Promise.all(input.trackedOrders.map(async (trackedOrder) => {
-    if (!trackedOrder.venueOrderId) {
-      throw new Error(`Tracked order ${trackedOrder.orderId} cannot be reconciled against Polymarket without a venueOrderId.`);
-    }
-
-    try {
-      const order = await input.client.getOrder(trackedOrder.venueOrderId);
-      return mapPolymarketOpenOrderToLiveSnapshot({
-        order,
-        observedAt,
-        clientOrderId: trackedOrder.orderId
-      });
-    } catch (error) {
-      if (input.ignoreMissingVenueOrders !== false && isNotFoundError(error)) {
-        return null;
-      }
-      throw new Error(`Polymarket order lookup failed for ${trackedOrder.orderId} (${trackedOrder.venueOrderId}): ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }));
-
-  return liveVenueStateSnapshotSchema.parse({
-    observedAt,
-    orders: resolvedOrders.filter((order): order is LiveVenueOrderSnapshot => order != null),
-    fills: []
-  });
-}
-
-export type PolymarketLiveGatewayOptions = {
-  clock?: () => Date;
-  submitBlockedReason?: string;
-  ignoreMissingVenueOrders?: boolean;
-};
-
-export class PolymarketLiveGateway implements LiveExchangeGateway {
-  private readonly clock: () => Date;
-  private readonly submitBlockedReason: string;
-  private readonly ignoreMissingVenueOrders: boolean;
-
-  constructor(
-    private readonly client: Pick<PolymarketClobClient, 'getOrder'>,
-    options: PolymarketLiveGatewayOptions = {}
-  ) {
-    this.clock = options.clock ?? (() => new Date());
-    this.submitBlockedReason = options.submitBlockedReason ?? DEFAULT_POLYMARKET_SUBMIT_BLOCKED_REASON;
-    this.ignoreMissingVenueOrders = options.ignoreMissingVenueOrders ?? true;
-  }
-
-  async submitOrder(_request: LiveSubmitOrderRequest): Promise<LiveSubmitResult> {
-    return {
-      transportStatus: 'rejected',
-      reason: this.submitBlockedReason
-    };
-  }
-
-  async fetchTrackedVenueStateSnapshot(trackedOrders: readonly TrackedVenueOrderRef[]): Promise<LiveVenueStateSnapshot> {
-    return buildPolymarketTrackedVenueStateSnapshot({
-      client: this.client,
-      trackedOrders,
-      observedAt: this.clock().toISOString(),
-      ignoreMissingVenueOrders: this.ignoreMissingVenueOrders
-    });
   }
 }
 

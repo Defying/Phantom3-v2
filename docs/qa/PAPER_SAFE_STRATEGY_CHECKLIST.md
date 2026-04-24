@@ -11,36 +11,27 @@ Date: `__________________`
 - [ ] `npm run check` passes
 - [ ] `npm run build:web` passes
 - [ ] `npm run verify:paper-safe` passes
-- [ ] `npm run verify:paper-runtime` passes
-- [ ] `npm run verify:trading-preference` passes
 - [ ] README and milestone docs still state that live execution is not implemented
 - [ ] control token is not left at the example value in `.env`
 
 ## 2) Startup smoke test
 
 - [ ] `cp .env.example .env`
-- [ ] set a fresh `PHANTOM3_V2_CONTROL_TOKEN`
-- [ ] confirm `PHANTOM3_V2_PUBLIC_BASE_URL` matches the operator access path
-- [ ] `npm run runtime:preflight` passes
-- [ ] start the app with `npm run runtime:start`
-- [ ] `npm run runtime:status` reports a reachable endpoint
+- [ ] set a fresh `WRAITH_CONTROL_TOKEN`
+- [ ] confirm `WRAITH_PUBLIC_BASE_URL` matches the operator access path
+- [ ] start the app with `npm run start`
 - [ ] `GET /api/health` returns `ok: true`
 - [ ] `GET /api/runtime` reports `mode: "paper"`
 - [ ] `GET /api/runtime` shows `execution` as blocked or otherwise clearly disarmed
 - [ ] `GET /api/runtime` shows `strategy` as idle until the strategy milestone actually lands
 
-## 3) Control-plane safety and trading preference honesty
+## 3) Control-plane safety
 
 - [ ] `POST /api/control/pause` without a token returns `401`
 - [ ] `POST /api/control/resume` without a token returns `401`
-- [ ] `POST /api/control/trading-preference` without a token returns `401`
-- [ ] invalid trading-preference payloads return `400`
 - [ ] authorized pause flips `paused` to `true`
 - [ ] authorized resume flips `paused` back to `false`
-- [ ] authorized trading-preference updates persist the selected profile across restart
-- [ ] selecting a legacy profile still leaves the runtime in paper mode with execution blocked/disarmed
-- [ ] runtime/watchlist messaging still says legacy profiles are reference-only until parity lands
-- [ ] pause, resume, and trading-preference actions are visible in runtime events or logs
+- [ ] pause and resume actions are visible in runtime events or logs
 
 Example manual checks:
 
@@ -49,13 +40,8 @@ curl -s http://127.0.0.1:4317/api/health
 curl -s http://127.0.0.1:4317/api/runtime
 curl -i -X POST http://127.0.0.1:4317/api/control/pause
 curl -i -X POST \
-  -H "X-Phantom3-Token: $PHANTOM3_V2_CONTROL_TOKEN" \
+  -H "X-Wraith-Token: $WRAITH_CONTROL_TOKEN" \
   http://127.0.0.1:4317/api/control/pause
-curl -i -X POST \
-  -H "X-Phantom3-Token: $PHANTOM3_V2_CONTROL_TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d '{"profile":"legacy-early-exit-live"}' \
-  http://127.0.0.1:4317/api/control/trading-preference
 ```
 
 ## 4) Market-data integrity
@@ -75,7 +61,6 @@ These stay unchecked until strategy code exists.
 - [ ] every rejected intent includes a reason
 - [ ] every paper fill includes the fill assumption or model version used
 - [ ] open paper positions can be reconstructed after restart
-- [ ] the runtime smoke verifier still proves restart recovery from ledger truth
 - [ ] replay results are comparable to the recorded live observer session
 - [ ] one accepted paper trade can be traced end-to-end
 - [ ] one rejected paper trade can be traced end-to-end

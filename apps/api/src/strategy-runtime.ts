@@ -1,22 +1,19 @@
-import {
-  RUNTIME_MIDPOINT_REFERENCE_PRICE_SOURCE,
-  type PaperIntentSummary,
-  type PaperPositionSummary,
-  type PaperStrategyView,
-  type RiskDecisionSummary,
-  type RuntimeMarket,
-  type RuntimeState,
-  type StrategyCandidate,
-  type StrategyRoutingSummary,
-  type StrategyRuntimeStatus,
-  type StrategyRuntimeSummary,
-  type StrategyStateSnapshot
+import type {
+  PaperIntentSummary,
+  PaperPositionSummary,
+  PaperStrategyView,
+  RiskDecisionSummary,
+  RuntimeMarket,
+  RuntimeState,
+  StrategyCandidate,
+  StrategyRuntimeStatus,
+  StrategyRuntimeSummary,
+  StrategyStateSnapshot
 } from '../../../packages/contracts/src/index.js';
 import type { ProjectedPosition } from '../../../packages/ledger/src/index.js';
 import type { PaperQuote } from '../../../packages/paper-execution/src/index.js';
 import type { PaperRiskDecision, PositionSnapshot, RiskMarketSnapshot } from '../../../packages/risk/src/index.js';
 import type { EvaluatedMarketSignal, PaperTradeIntent, StrategySignalReport } from '../../../packages/strategy/src/index.js';
-import { resolveStrategyRuntimeRoute } from '../../../packages/strategy/src/index.js';
 
 const STRATEGY_ENGINE_ID = 'paper-strategy-runtime';
 const STRATEGY_VERSION = 'paper-signal-v1';
@@ -32,7 +29,7 @@ export type StrategyEvaluationPayload = {
   lastEvaluatedAt?: string | null;
 };
 
-type StrategyStateBasis = Pick<RuntimeState, 'mode' | 'paused' | 'marketData' | 'markets' | 'tradingPreference'>;
+type StrategyStateBasis = Pick<RuntimeState, 'mode' | 'paused' | 'marketData' | 'markets'>;
 
 function clamp(value: number, minimum: number, maximum: number): number {
   return Math.min(Math.max(value, minimum), maximum);
@@ -41,10 +38,6 @@ function clamp(value: number, minimum: number, maximum: number): number {
 function round(value: number, digits = 4): number {
   const factor = 10 ** digits;
   return Math.round(value * factor) / factor;
-}
-
-function positionCapitalAtRiskUsd(position: Pick<PaperPositionSummary, 'quantity' | 'averageEntryPrice'>): number {
-  return Math.max(0, round(position.quantity * position.averageEntryPrice, 2));
 }
 
 function compactUsd(value: number): string {
@@ -57,12 +50,8 @@ function compactUsd(value: number): string {
   return `$${round(value, 0)}`;
 }
 
-function sideMidpointReferencePrice(market: RuntimeMarket, side: 'yes' | 'no'): number | null {
+function sidePrice(market: RuntimeMarket, side: 'yes' | 'no'): number | null {
   return side === 'yes' ? market.yesPrice : market.noPrice;
-}
-
-function marketPriceSource(market: RuntimeMarket | null): RuntimeMarket['priceSource'] {
-  return market?.priceSource ?? RUNTIME_MIDPOINT_REFERENCE_PRICE_SOURCE;
 }
 
 function sideTokenId(market: RuntimeMarket, side: 'yes' | 'no'): string | null {
@@ -100,7 +89,6 @@ function toStrategyCandidate(signal: EvaluatedMarketSignal): StrategyCandidate {
     question: signal.market.question,
     yesPrice: signal.market.yesPrice,
     noPrice: signal.market.noPrice,
-    priceSource: signal.market.priceSource,
     spread: signal.market.spread,
     liquidity: signal.market.liquidity,
     volume24hr: signal.market.volume24hr,
@@ -120,25 +108,6 @@ function selectCandidates(report: StrategySignalReport | null): StrategyCandidat
   return [...accepted, ...rejected].slice(0, MAX_STRATEGY_CANDIDATES);
 }
 
-function buildRoutingSummary(state: StrategyStateBasis): StrategyRoutingSummary {
-  const route = resolveStrategyRuntimeRoute(state.tradingPreference.selected.profile);
-  const evaluatedStrategyVersion = route.evaluated.strategyVersion;
-
-  return {
-    requestedProfile: route.requested.profile,
-    requestedLabel: route.requested.label,
-    evaluatedProfile: route.evaluated.profile,
-    evaluatedLabel: route.evaluated.label,
-    strategyId: route.evaluated.strategyId,
-    strategyVersion: evaluatedStrategyVersion,
-    selectionMode: route.evaluated.selectionMode,
-    executionMode: route.executionMode,
-    entryPolicy: route.entryPolicy,
-    summary: route.summary,
-    note: route.note
-  };
-}
-
 export function createRuntimeIntentId(intent: PaperTradeIntent): string {
   const at = intent.generatedAt.replace(/[:.]/g, '-');
   return `intent-${intent.marketId}-${intent.side}-${at}`;
@@ -155,16 +124,10 @@ export function createEntryIntentSummary(
     marketId: intent.marketId,
     marketQuestion: intent.question,
     side: intent.side,
-    kind: 'entry',
-    executionSide: 'buy',
-    reduceOnly: false,
     status,
     createdAt: options.createdAt ?? intent.generatedAt,
     thesis: intent.thesis.summary,
     desiredSizeUsd: round(desiredSizeUsd, 2),
-    positionId: null,
-    trigger: null,
-    limitPrice: intent.entry.acceptablePriceBand.max,
     maxEntryPrice: intent.entry.acceptablePriceBand.max
   };
 }
@@ -176,9 +139,7 @@ export function createExitIntentSummary(input: {
   side: 'yes' | 'no';
   createdAt: string;
   desiredSizeUsd: number;
-  positionId: string;
-  trigger: PaperIntentSummary['trigger'];
-  limitPrice: number | null;
+  maxEntryPrice: number | null;
   thesis: string;
 }): PaperIntentSummary {
   return {
@@ -186,33 +147,24 @@ export function createExitIntentSummary(input: {
     marketId: input.marketId,
     marketQuestion: input.marketQuestion,
     side: input.side,
-    kind: 'exit',
-    executionSide: 'sell',
-    reduceOnly: true,
     status: 'submitted',
     createdAt: input.createdAt,
     thesis: input.thesis,
     desiredSizeUsd: round(input.desiredSizeUsd, 2),
-    positionId: input.positionId,
-    trigger: input.trigger,
-    limitPrice: input.limitPrice,
-    maxEntryPrice: null
+    maxEntryPrice: input.maxEntryPrice
   };
 }
 
 export function createRiskDecisionSummary(
   decision: PaperRiskDecision,
   marketId: string,
-  question: string,
-  options: { kind?: RiskDecisionSummary['kind']; reduceOnly?: boolean } = {}
+  question: string
 ): RiskDecisionSummary {
   return {
     id: `${decision.intentId}:${decision.evaluatedAt}`,
     intentId: decision.intentId,
     marketId,
     question,
-    kind: options.kind ?? 'entry',
-    reduceOnly: options.reduceOnly ?? false,
     decision: decision.decision,
     approvedSizeUsd: round(decision.approvedSizeUsd, 2),
     createdAt: decision.evaluatedAt,
@@ -220,20 +172,16 @@ export function createRiskDecisionSummary(
   };
 }
 
-export function createPaperPositionSummary(
-  position: ProjectedPosition,
-  market: RuntimeMarket | null,
-  options: { exit?: PaperPositionSummary['exit'] } = {}
-): PaperPositionSummary | null {
+export function createPaperPositionSummary(position: ProjectedPosition, market: RuntimeMarket | null): PaperPositionSummary | null {
   if (position.status !== 'open' || position.netQuantity <= 0 || position.averageEntryPrice == null) {
     return null;
   }
 
   const inferredSide = market ? inferSideFromToken(market, position.tokenId) : 'yes';
-  const referenceMarkPrice = market ? sideMidpointReferencePrice(market, inferredSide) : null;
-  const unrealizedPnlUsd = referenceMarkPrice == null
+  const markPrice = market ? sidePrice(market, inferredSide) : null;
+  const unrealizedPnlUsd = markPrice == null
     ? null
-    : round((referenceMarkPrice - position.averageEntryPrice) * position.netQuantity, 2);
+    : round((markPrice - position.averageEntryPrice) * position.netQuantity, 2);
 
   return {
     id: position.positionId,
@@ -243,12 +191,10 @@ export function createPaperPositionSummary(
     side: inferredSide,
     quantity: round(position.netQuantity, 6),
     averageEntryPrice: round(position.averageEntryPrice),
-    markPrice: referenceMarkPrice == null ? null : round(referenceMarkPrice),
-    markPriceSource: referenceMarkPrice == null ? undefined : marketPriceSource(market),
+    markPrice: markPrice == null ? null : round(markPrice),
     unrealizedPnlUsd,
     openedAt: position.openedAt ?? position.updatedAt ?? new Date().toISOString(),
-    status: 'open',
-    exit: options.exit ?? null
+    status: 'open'
   };
 }
 
@@ -256,24 +202,29 @@ export function createRiskPositionSnapshot(summary: PaperPositionSummary): Posit
   return {
     marketId: summary.marketId,
     side: summary.side,
-    exposureUsd: positionCapitalAtRiskUsd(summary),
+    exposureUsd: Math.max(0, round(summary.quantity * (summary.markPrice ?? summary.averageEntryPrice), 2)),
     quantity: summary.quantity,
     markPrice: summary.markPrice,
     openedAt: summary.openedAt
   };
 }
 
-function marketReferenceQuote(market: RuntimeMarket, side: 'yes' | 'no'): { midpoint: number | null; bestBid: null; bestAsk: null } {
-  const midpoint = sideMidpointReferencePrice(market, side);
+function marketBookPrices(market: RuntimeMarket, side: 'yes' | 'no'): { midpoint: number | null; bestBid: number | null; bestAsk: number | null } {
+  const midpoint = sidePrice(market, side);
+  if (midpoint == null) {
+    return { midpoint: null, bestBid: null, bestAsk: null };
+  }
+
+  const halfSpread = Math.max(0, (market.spread ?? 0) / 2);
   return {
-    midpoint: midpoint == null ? null : round(midpoint),
-    bestBid: null,
-    bestAsk: null
+    midpoint,
+    bestBid: round(clamp(midpoint - halfSpread, 0.001, 0.999)),
+    bestAsk: round(clamp(midpoint + halfSpread, 0.001, 0.999))
   };
 }
 
 export function createRiskMarketSnapshot(market: RuntimeMarket, side: 'yes' | 'no', observedAt: string): RiskMarketSnapshot {
-  const prices = marketReferenceQuote(market, side);
+  const prices = marketBookPrices(market, side);
 
   return {
     marketId: market.id,
@@ -290,7 +241,7 @@ export function createRiskMarketSnapshot(market: RuntimeMarket, side: 'yes' | 'n
 }
 
 export function createPaperQuote(market: RuntimeMarket, side: 'yes' | 'no', observedAt: string): PaperQuote | null {
-  const prices = marketReferenceQuote(market, side);
+  const prices = marketBookPrices(market, side);
   const tokenId = sideTokenId(market, side) ?? `${market.id}:${side}`;
   if (prices.midpoint == null) {
     return null;
@@ -304,12 +255,7 @@ export function createPaperQuote(market: RuntimeMarket, side: 'yes' | 'no', obse
     bestBid: prices.bestBid,
     bestAsk: prices.bestAsk,
     midpoint: prices.midpoint,
-    source: RUNTIME_MIDPOINT_REFERENCE_PRICE_SOURCE,
-    metadata: {
-      referenceOnly: true,
-      executableBook: false,
-      priceSource: marketPriceSource(market)
-    }
+    source: 'market-snapshot'
   };
 }
 
@@ -318,37 +264,27 @@ function buildSummaryText(
   payload: StrategyEvaluationPayload,
   exposureUsd: number
 ): string {
-  const routing = buildRoutingSummary(state);
-  const openIntentCount = payload.intents.filter((intent) => intent.status === 'submitted' || intent.status === 'watching').length;
-
   if (state.mode !== 'paper') {
     return 'Strategy runtime stays sanitized until the process is explicitly armed for paper mode.';
   }
   if (state.paused) {
-    return `${routing.requestedLabel} is selected, but the paper runtime is paused. Existing paper state is preserved and no new evaluations are emitted.`;
+    return 'Paper strategy runtime is paused. Existing paper state is preserved and no new evaluations are emitted.';
   }
   if (state.marketData.stale) {
     return state.marketData.error
-      ? `${routing.requestedLabel} is waiting on fresh market data: ${state.marketData.error}`
-      : `${routing.requestedLabel} is waiting on fresh market data before evaluation.`;
+      ? `Paper strategy runtime is waiting on fresh market data: ${state.marketData.error}`
+      : 'Paper strategy runtime is waiting on fresh market data before evaluation.';
   }
   if (state.markets.length === 0) {
-    return `${routing.requestedLabel} is selected, but there are no markets to observe yet.`;
+    return 'Paper strategy runtime is booted with no markets to observe yet.';
   }
-
-  if (routing.executionMode === 'reference-only') {
-    return `${routing.requestedLabel} is reference-only. The runtime is still scoring ${state.markets.length} markets with ${routing.evaluatedLabel} for visibility, carrying ${payload.positions.length} open paper positions, ${openIntentCount} open paper intents, and ${compactUsd(exposureUsd)} open exposure while new entry emission stays parked.`;
-  }
-
-  return `${routing.requestedLabel} is active across ${state.markets.length} watched markets, ${openIntentCount} open paper intents, ${payload.positions.length} open paper positions, and ${compactUsd(exposureUsd)} open exposure.`;
+  const openIntentCount = payload.intents.filter((intent) => intent.status === 'submitted' || intent.status === 'watching').length;
+  return `Paper strategy is watching ${state.markets.length} markets, carrying ${openIntentCount} open paper intents, ${payload.positions.length} open paper positions, and ${compactUsd(exposureUsd)} open exposure.`;
 }
 
 function buildNotes(state: StrategyStateBasis, payload: StrategyEvaluationPayload): string[] {
-  const routing = buildRoutingSummary(state);
   const notes = [
     'Paper-only runtime. No real exchange writes are performed.',
-    routing.summary,
-    routing.note,
     'Strategy signals are conservative heuristics, not proof of edge.'
   ];
 
@@ -378,16 +314,17 @@ export function createStrategyRuntimeSummary(
 ): StrategyRuntimeSummary {
   const latestSnapshot = snapshots[0] ?? null;
   const candidates = payload.report ? selectCandidates(payload.report) : latestSnapshot?.candidates ?? [];
-  const openExposureUsd = payload.positions.reduce((sum, position) => sum + positionCapitalAtRiskUsd(position), 0);
-  const routing = buildRoutingSummary(state);
+  const openExposureUsd = payload.positions.reduce(
+    (sum, position) => sum + position.quantity * (position.markPrice ?? position.averageEntryPrice),
+    0
+  );
 
   return {
     engineId: STRATEGY_ENGINE_ID,
-    strategyVersion: payload.report?.engine.strategyVersion ?? routing.strategyVersion ?? STRATEGY_VERSION,
+    strategyVersion: payload.report?.engine.strategyVersion ?? STRATEGY_VERSION,
     mode: state.mode,
     status: deriveStrategyStatus(state),
     safeToExpose: true,
-    routing,
     lastEvaluatedAt: payload.lastEvaluatedAt ?? state.marketData.syncedAt ?? latestSnapshot?.createdAt ?? null,
     lastSnapshotAt: latestSnapshot?.createdAt ?? null,
     watchedMarketCount: state.markets.length,

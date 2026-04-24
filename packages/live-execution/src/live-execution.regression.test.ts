@@ -34,7 +34,7 @@ function clock(): Date {
 async function createHarness(
   submitOrder: (request: LiveSubmitOrderRequest, context: { ledger: JsonlLedger }) => Promise<LiveSubmitResult>
 ) {
-  const directory = await mkdtemp(join(tmpdir(), 'phantom3-live-execution-'));
+  const directory = await mkdtemp(join(tmpdir(), 'wraith-live-execution-'));
   cleanupDirs.push(directory);
 
   const ledger = new JsonlLedger({ directory, clock });
@@ -273,7 +273,8 @@ test('partial fills survive repeated snapshot reconciliation without double-coun
         liquidityRole: 'taker',
         occurredAt: FIXED_NOW
       }
-    ]
+    ],
+    positions: []
   });
 
   assert.deepEqual(partial.filledOrderIds, [submission.orderId]);
@@ -328,7 +329,8 @@ test('partial fills survive repeated snapshot reconciliation without double-coun
         liquidityRole: 'taker',
         occurredAt: FIXED_NOW
       }
-    ]
+    ],
+    positions: []
   });
 
   assert.deepEqual(final.filledOrderIds, [submission.orderId]);
@@ -343,7 +345,7 @@ test('partial fills survive repeated snapshot reconciliation without double-coun
   );
 });
 
-test('stale venue snapshots fail closed into reconcile without synthesizing fills or positions', async () => {
+test('stale venue snapshots are skipped instead of mutating tracked orders', async () => {
   const { adapter, ledger } = await createHarness(async (request) => ({
     transportStatus: 'acknowledged',
     order: makeVenueOrder(request, {
@@ -374,15 +376,15 @@ test('stale venue snapshots fail closed into reconcile without synthesizing fill
         status: 'filled'
       }
     ],
-    fills: []
+    fills: [],
+    positions: []
   });
 
   assert.match(stale.skippedReason ?? '', /older than 15000ms/);
-  assert.deepEqual(stale.reconcileRequiredOrderIds, [submission.orderId]);
+  assert.deepEqual(stale.reconciledOrderIds, []);
 
   const projection = await ledger.readProjection();
-  assert.equal(projection.orders.get(submission.orderId)?.status, 'reconcile');
-  assert.equal(projection.killSwitch.active, true);
+  assert.equal(projection.orders.get(submission.orderId)?.status, 'open');
   assert.equal(projection.fills.length, 0);
   assert.equal(projection.positions.get(POSITION_KEY), undefined);
 });
@@ -432,7 +434,8 @@ test('duplicate candidate snapshots fail closed into reconcile instead of guessi
         status: 'open'
       }
     ],
-    fills: []
+    fills: [],
+    positions: []
   });
 
   assert.deepEqual(duplicate.reconcileRequiredOrderIds, [submission.orderId]);
@@ -486,7 +489,8 @@ test('unmatched venue orders are surfaced explicitly without mutating tracked lo
         status: 'open'
       }
     ],
-    fills: []
+    fills: [],
+    positions: []
   });
 
   assert.deepEqual(reconcile.unmatchedVenueOrderIds, ['venue-orphan-untracked']);
@@ -598,7 +602,7 @@ test('reduce-only flatten uses only unreserved inventory and records the operato
 });
 
 test('restart recovery reattaches late venue evidence by clientOrderId instead of orphaning the tracked order', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'phantom3-live-restart-'));
+  const directory = await mkdtemp(join(tmpdir(), 'wraith-live-restart-'));
   cleanupDirs.push(directory);
 
   const ledgerBeforeRestart = new JsonlLedger({ directory, clock });
@@ -674,7 +678,8 @@ test('restart recovery reattaches late venue evidence by clientOrderId instead o
         liquidityRole: 'taker',
         occurredAt: FIXED_NOW
       }
-    ]
+    ],
+    positions: []
   });
 
   assert.deepEqual(recovered.filledOrderIds, [submission.orderId]);
