@@ -4,3 +4,5 @@ data/
 apps/web/dist/
 .env
 .DS_Store
+
+runtime/

@@ -83,11 +83,16 @@ type UpDownScanRow = {
   minutesToEnd: number;
   side: 'Up' | 'Down';
   sidePrice: number | null;
+  buyPrice: number | null;
   yes: number | null;
   no: number | null;
   coinbaseOpen: number;
   coinbaseCurrent: number;
   moveBps: number;
+  remainingSigmaBps: number;
+  modelProbability: number;
+  edge: number | null;
+  kellyFraction: number;
   spread: number | null;
   liquidity: number | null;
   volume24hr: number | null;
@@ -450,11 +455,13 @@ function UpDownScanPanel({ scan, loading, onRefresh }: { scan: UpDownScanResult 
               <div className="detail-card-head">
                 <div>
                   <h3>{row.asset} {row.window} · {row.side}</h3>
-                  <p>{row.minutesToEnd.toFixed(1)}m left · move {row.moveBps.toFixed(2)} bps · entry {formatPercent(row.sidePrice)}</p>
+                  <p>{row.minutesToEnd.toFixed(1)}m left · move {row.moveBps.toFixed(2)} bps · buy {formatPercent(row.buyPrice ?? row.sidePrice)}</p>
                 </div>
                 <span className={`badge ${row.decision === 'CANDIDATE' ? 'healthy' : row.decision === 'WATCH' ? 'warning' : 'blocked'}`}>{row.decision}</span>
               </div>
               <div className="field-grid">
+                <div className="field-chip"><span>Model / Edge</span><strong>{formatPercent(row.modelProbability)} / {formatPercent(row.edge)}</strong></div>
+                <div className="field-chip"><span>Kelly cap</span><strong>{formatPercent(row.kellyFraction)}</strong></div>
                 <div className="field-chip"><span>Up / Down</span><strong>{formatPercent(row.yes)} / {formatPercent(row.no)}</strong></div>
                 <div className="field-chip"><span>Spread</span><strong>{formatPercent(row.spread)}</strong></div>
                 <div className="field-chip"><span>Liquidity</span><strong>{formatMaybeMoney(row.liquidity)}</strong></div>

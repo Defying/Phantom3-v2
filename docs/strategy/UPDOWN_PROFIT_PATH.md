@@ -1,0 +1,45 @@
+# Wraith Up/Down Profit Path
+
+Wraith should not optimize for “more trades.” It should optimize for positive expected value with controlled downside.
+
+## Current edge hypothesis
+
+Short-window BTC/ETH/SOL Up/Down markets can become mispriced when the underlying has already moved far enough from the opening price that the market's entry price underestimates the probability of staying on that side through resolution.
+
+## Trade gate
+
+A setup is only actionable when all of these are true:
+
+1. Market is inside the allowed time window, but not too close to resolution.
+2. Spread is tight enough to enter without donating the edge.
+3. Liquidity is high enough to enter and exit realistically.
+4. Coinbase proxy move has enough buffer from the open.
+5. Model probability exceeds the current buy price by at least `minEdge`.
+6. The entry price is not so high that downside/reversal risk dominates.
+
+If any gate fails, the correct action is no trade.
+
+## Model v0
+
+The scanner estimates remaining volatility from recent Coinbase one-minute candles, converts the current open-to-spot buffer into a normal tail probability, then compares that probability to the Polymarket best buy price.
+
+This is intentionally conservative and transparent. It is not a live-capital proof. It is a ranking/filtering layer that tells us which windows deserve paper fills and manual source checks.
+
+## Sizing
+
+The scanner emits a capped Kelly fraction. For paper/live experiments, treat this as a maximum position fraction, not a target. Early paper trading should use tiny fixed sizes until the observed hit rate and realized prices beat the model assumptions.
+
+## Operating loop
+
+1. Run `npm run scan:updown` for the full ranked board.
+2. Run `npm run watch:updown` on an interval for candidate-only alerts.
+3. Paper trade only `CANDIDATE` rows.
+4. Record fill price, market close result, modeled probability, edge, and blocker state.
+5. Promote to live only after enough paper samples show positive realized EV after spread/slippage.
+
+## No-go rules
+
+- No live trades from `WATCH` or `SKIP`.
+- No live trades while source/proxy mismatch is unresolved.
+- No live trades if Wraith cannot prove durable ledger/reconciliation for the venue path.
+- No martingale, no doubling down, no “make it back” trades.
