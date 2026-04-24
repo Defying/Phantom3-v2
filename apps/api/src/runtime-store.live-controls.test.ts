@@ -96,6 +96,7 @@ function makeConfig(dir: string, overrides: ConfigOverrides = {}): AppConfig {
     logDir: join(dir, 'logs'),
     marketRefreshMs: 30_000,
     marketLimit: 4,
+    runtimeMode: 'paper',
     liveModeEnabled: true,
     liveArmingEnabled: true,
     liveExecution,
@@ -213,6 +214,168 @@ async function flushStore(store: RuntimeStore | null): Promise<void> {
   }
   await internal.persist();
 }
+
+
+test('simulation mode rejects live dependencies and never installs live controls', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'wraith-sim-runtime-'));
+  let store: RuntimeStore | null = null;
+  try {
+    const config = makeConfig(dir, {
+      runtimeMode: 'simulation',
+      liveModeEnabled: false,
+      liveArmingEnabled: false,
+      liveExecution: {
+        enabled: false,
+        venue: 'polymarket',
+        maxQuoteAgeMs: 60_000,
+        maxReconcileAgeMs: 60_000,
+        missingOrderGraceMs: 30_000
+      }
+    });
+    const exchange = createExchange([]);
+    assert.throws(
+      () => new RuntimeStore(config, {
+        liveExchange: exchange,
+        liveVenueSnapshot: async () => createVenueSnapshot(nowIso()),
+        marketFetcher: createMarketFetcher(nowIso())
+      }),
+      /Simulation mode must not receive live exchange/i
+    );
+
+    store = await createStore({ config });
+    const state = store.getState();
+    assert.equal(state.mode, 'simulation');
+    assert.equal(state.execution.requestedMode, 'simulation');
+    assert.equal(state.execution.live.configured, false);
+    assert.equal(state.execution.live.liveAdapterReady, false);
+    await assert.rejects(() => store!.armLive(), /Live mode is not enabled/i);
+  } finally {
+    await flushStore(store);
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+
+test('simulation flatten refuses existing live provenance without calling a live adapter', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'wraith-sim-live-provenance-'));
+  let liveSeedStore: RuntimeStore | null = null;
+  let simulationStore: RuntimeStore | null = null;
+  try {
+    const liveConfig = makeConfig(dir, {
+      runtimeMode: 'paper',
+      liveModeEnabled: true,
+      liveArmingEnabled: true,
+      liveExecution: {
+        enabled: true,
+        venue: 'polymarket',
+        maxQuoteAgeMs: 60_000,
+        maxReconcileAgeMs: 60_000,
+        missingOrderGraceMs: 30_000
+      }
+    });
+    const requests: LiveSubmitOrderRequest[] = [];
+    const exchange = createExchange(requests);
+
+    liveSeedStore = await createStore({
+      config: liveConfig,
+      exchange,
+      liveVenueSnapshot: async () => createVenueSnapshot(nowIso())
+    });
+
+    const internal = liveSeedStore as any;
+    const quote = createPaperQuote(market, 'yes', nowIso());
+    assert.ok(quote, 'expected a usable quote for the seeded test market');
+    await internal.liveExecution.submitApprovedIntent({
+      intent: {
+        sessionId: 'seed-live-position',
+        intentId: 'seed-live-intent',
+        strategyId: 'seed-strategy',
+        marketId: market.id,
+        tokenId: market.yesTokenId ?? 'token-yes',
+        side: 'buy',
+        limitPrice: market.yesPrice ?? 0.44,
+        quantity: 10,
+        approvedAt: nowIso(),
+        thesis: 'Seed live provenance before switching the process to simulation.'
+      },
+      quote
+    });
+    await flushStore(liveSeedStore);
+
+    const simulationConfig = makeConfig(dir, {
+      runtimeMode: 'simulation',
+      liveModeEnabled: false,
+      liveArmingEnabled: false,
+      liveExecution: {
+        enabled: false,
+        venue: 'polymarket',
+        maxQuoteAgeMs: 60_000,
+        maxReconcileAgeMs: 60_000,
+        missingOrderGraceMs: 30_000
+      }
+    });
+    simulationStore = await createStore({ config: simulationConfig });
+    assert.equal(simulationStore.getState().mode, 'simulation');
+
+    const flatten = await simulationStore.flattenOpenPositions();
+    assert.equal(flatten.submitted, 0);
+    assert.equal(flatten.skipped, 1);
+    assert.match(flatten.errors.join('\n'), /simulation mode refuses to mutate live provenance/i);
+    assert.equal(requests.length, 1);
+  } finally {
+    await flushStore(simulationStore);
+    await flushStore(liveSeedStore);
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+
+test('simulation strategy submissions use simulation ledger provenance', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'wraith-sim-provenance-'));
+  let store: RuntimeStore | null = null;
+  try {
+    const config = makeConfig(dir, {
+      runtimeMode: 'simulation',
+      liveModeEnabled: false,
+      liveArmingEnabled: false,
+      liveExecution: {
+        enabled: false,
+        venue: 'polymarket',
+        maxQuoteAgeMs: 60_000,
+        maxReconcileAgeMs: 60_000,
+        missingOrderGraceMs: 30_000
+      }
+    });
+    store = await createStore({ config });
+    const internal = store as any;
+    const quote = createPaperQuote(market, 'yes', nowIso());
+    assert.ok(quote, 'expected a usable quote for the seeded test market');
+    await internal.paperExecution.submitApprovedIntent({
+      intent: {
+        sessionId: 'simulation-test',
+        intentId: 'simulation-intent',
+        strategyId: 'simulation-strategy',
+        marketId: market.id,
+        tokenId: market.yesTokenId ?? 'token-yes',
+        side: 'buy',
+        limitPrice: 0.46,
+        quantity: 5,
+        approvedAt: nowIso(),
+        thesis: 'Seed a simulation ledger entry.'
+      },
+      quote
+    });
+
+    const projection = await internal.ledger.readProjection();
+    assert.equal([...projection.intents.values()].at(-1)?.executionMode, 'simulation');
+    assert.equal([...projection.orders.values()].at(-1)?.executionMode, 'simulation');
+    assert.equal(projection.fills.at(-1)?.executionMode, 'simulation');
+    assert.equal([...projection.positions.values()].at(-1)?.executionMode, 'simulation');
+  } finally {
+    await flushStore(store);
+    await rm(dir, { recursive: true, force: true });
+  }
+});
 
 test('live arming stays fail-closed while the adapter path is still scaffold-only', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'wraith-live-runtime-'));

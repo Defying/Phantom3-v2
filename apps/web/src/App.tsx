@@ -637,13 +637,16 @@ export function App() {
   const paperPositions = useMemo(() => buildPaperPositionCards(runtime), [runtime]);
   const strategyPanel = useMemo(() => extractStrategyPanel(runtime), [runtime]);
   const liveControl = runtime?.execution.live ?? null;
+  const isSimulation = runtime?.mode === 'simulation';
+  const executionLabel = isSimulation ? 'Simulation' : 'Paper';
   const liveTone = useMemo<Tone>(() => {
+    if (isSimulation) return 'info';
     if (!liveControl) return 'idle';
     if (liveControl.status === 'blocked-by-reconcile') return 'blocked';
     if (liveControl.killSwitchActive || liveControl.status === 'scaffold') return 'warning';
     if (liveControl.status === 'adapter-ready') return liveControl.armed ? 'healthy' : 'info';
     return 'idle';
-  }, [liveControl]);
+  }, [isSimulation, liveControl]);
 
   const sendControl = async (path: ControlPath, body?: Record<string, unknown>) => {
     if (!token) {
@@ -681,7 +684,7 @@ export function App() {
           <p className="eyebrow">Wraith</p>
           <h1>Phone-ready observer dashboard</h1>
           <p className="subtle">
-            Safe-by-default v2 control plane. Market truth is now read live from Polymarket, while write actions remain token-gated.
+            Safe-by-default v2 control plane. Market truth is read live from Polymarket; simulation mode cannot install wallet or order gateways.
           </p>
         </div>
         <div className={`status-pill ${statusTone}`}>
@@ -738,7 +741,7 @@ export function App() {
             <strong>{riskDecisions.length}</strong>
           </div>
           <div className="summary-tile">
-            <span>Paper positions</span>
+            <span>{executionLabel} positions</span>
             <strong>{paperPositions.length}</strong>
           </div>
           <div className="summary-tile">
@@ -761,16 +764,16 @@ export function App() {
       <section className="card">
         <div className="section-head section-head-stack">
           <div>
-            <p className="eyebrow">Live control plane</p>
-            <h2>{liveControl ? humanizeKey(liveControl.status) : 'Loading live controls'}</h2>
+            <p className="eyebrow">{isSimulation ? 'Simulation lock' : 'Live control plane'}</p>
+            <h2>{isSimulation ? 'No wallet / no orders' : liveControl ? humanizeKey(liveControl.status) : 'Loading live controls'}</h2>
           </div>
-          <span className={`status-pill ${liveTone}`}>{liveControl?.armed ? 'armed' : liveControl ? 'disarmed' : 'loading'}</span>
+          <span className={`status-pill ${liveTone}`}>{isSimulation ? 'simulation' : liveControl?.armed ? 'armed' : liveControl ? 'disarmed' : 'loading'}</span>
         </div>
-        <p className="subtle">{liveControl?.summary ?? 'Waiting for live control state.'}</p>
+        <p className="subtle">{isSimulation ? 'Runtime is structurally disarmed: no wallet readiness, no live adapter, no exchange order path.' : liveControl?.summary ?? 'Waiting for live control state.'}</p>
         <div className="summary-strip">
           <div className="summary-tile">
             <span>Adapter</span>
-            <strong>{liveControl ? (liveControl.liveAdapterReady ? 'ready' : liveControl.configured ? 'scaffold' : 'paper-only') : '...'}</strong>
+            <strong>{isSimulation ? 'not installed' : liveControl ? (liveControl.liveAdapterReady ? 'ready' : liveControl.configured ? 'scaffold' : 'paper-only') : '...'}</strong>
           </div>
           <div className="summary-tile">
             <span>Can arm</span>
@@ -819,10 +822,10 @@ export function App() {
       </section>
 
       <DetailSection
-        eyebrow="Paper ledger"
-        title={`Paper positions (${paperPositions.length})`}
-        subtitle={paperPositions.length ? 'Open or recently updated paper positions from the runtime payload.' : 'The dashboard is ready for paper positions as soon as the runtime starts exposing them.'}
-        emptyState="No paper positions are available yet. Position lots or paper holdings will appear here once they are added to runtime state."
+        eyebrow={`${executionLabel} ledger`}
+        title={`${executionLabel} positions (${paperPositions.length})`}
+        subtitle={paperPositions.length ? `Open or recently updated ${executionLabel.toLowerCase()} positions from the runtime payload.` : `The dashboard is ready for ${executionLabel.toLowerCase()} positions as soon as the runtime starts exposing them.`}
+        emptyState={`No ${executionLabel.toLowerCase()} positions are available yet. Position lots or holdings will appear here once they are added to runtime state.`}
         items={paperPositions}
       />
 
@@ -896,13 +899,20 @@ export function App() {
               <button className="secondary" disabled={busy || loading} onClick={() => void sendControl('/api/control/resume')}>Resume</button>
             </div>
           </div>
-          <div className="control-group">
-            <span>Live arming</span>
-            <div className="button-row">
-              <button disabled={busy || loading || !liveControl?.canArm} onClick={() => void sendControl('/api/control/live/arm')}>Arm live</button>
-              <button className="secondary" disabled={busy || loading || !liveControl?.armed} onClick={() => void sendControl('/api/control/live/disarm')}>Disarm live</button>
+          {isSimulation ? (
+            <div className="control-group">
+              <span>Simulation lock</span>
+              <p className="subtle small">Live arming is hidden because this runtime cannot construct wallet or order paths.</p>
             </div>
-          </div>
+          ) : (
+            <div className="control-group">
+              <span>Live arming</span>
+              <div className="button-row">
+                <button disabled={busy || loading || !liveControl?.canArm} onClick={() => void sendControl('/api/control/live/arm')}>Arm live</button>
+                <button className="secondary" disabled={busy || loading || !liveControl?.armed} onClick={() => void sendControl('/api/control/live/disarm')}>Disarm live</button>
+              </div>
+            </div>
+          )}
           <div className="control-group">
             <span>Flatten</span>
             <div className="button-row">
@@ -914,7 +924,7 @@ export function App() {
                 {liveControl?.flattenPath === 'live'
                   ? 'Reduce-only flatten'
                   : liveControl?.flattenPath === 'paper'
-                    ? 'Flatten paper positions'
+                    ? isSimulation ? 'Flatten simulated positions' : 'Flatten paper positions'
                     : 'Flatten blocked'}
               </button>
             </div>
@@ -937,7 +947,7 @@ export function App() {
               </button>
             </div>
           </div>
-          <p className="subtle small">{liveControl?.summary ?? 'Waiting for control readiness.'}</p>
+          <p className="subtle small">{isSimulation ? 'Simulation controls only mutate local ledger/runtime state.' : liveControl?.summary ?? 'Waiting for control readiness.'}</p>
         </article>
 
         <article className="card">

@@ -27,7 +27,9 @@ function describeError(error: unknown): string {
 function walletReadiness() {
   const venue = config.liveExecution.polymarket;
   const auth = venue.auth;
+  const simulation = config.runtimeMode === 'simulation';
   return {
+    runtimeMode: config.runtimeMode,
     liveModeEnabled: config.liveModeEnabled,
     liveArmingEnabled: config.liveArmingEnabled,
     liveExecutionEnabled: config.liveExecution.enabled,
@@ -41,15 +43,26 @@ function walletReadiness() {
     apiCredentialsConfigured: auth.hasApiCredentials,
     allowApiKeyDerivation: auth.allowApiKeyDerivation,
     needsApiKeyDerivation: auth.needsApiKeyDerivation,
-    canAccessAuthenticatedApi: auth.canAccessAuthenticatedApi,
-    configCanPlaceOrders: auth.canPlaceOrders,
-    gatewayInstalled: Boolean(store && store.getState().execution.live.liveAdapterReady),
-    setupError: liveSetupError,
+    walletRequired: !simulation,
+    orderPlacementDisabled: simulation,
+    canAccessAuthenticatedApi: simulation ? false : auth.canAccessAuthenticatedApi,
+    configCanPlaceOrders: simulation ? false : auth.canPlaceOrders,
+    canPlaceOrders: simulation ? false : auth.canPlaceOrders,
+    gatewayInstalled: simulation ? false : Boolean(store && store.getState().execution.live.liveAdapterReady),
+    setupError: simulation ? null : liveSetupError,
+    message: simulation
+      ? 'Simulation mode is active. No wallet is required and this process cannot place orders.'
+      : auth.canPlaceOrders
+        ? 'Wallet/API config can access authenticated Polymarket APIs, but live arming still controls operator actions.'
+        : 'Wallet/API config is incomplete for order placement.',
     safeToLog: true
   };
 }
 
 async function createRuntimeOptions(): Promise<RuntimeStoreOptions> {
+  if (config.runtimeMode === 'simulation') {
+    return {};
+  }
   if (!config.liveModeEnabled || !config.liveExecution.enabled) {
     return {};
   }
@@ -133,19 +146,19 @@ async function main(): Promise<void> {
   app.get('/api/paper/strategy', async (request, reply) => {
     const paperStrategy = store.getPaperStrategyView(readLimit(request.query, 6, 12));
     if (!paperStrategy) {
-      return reply.code(409).send({ error: 'Paper strategy data is only available while the runtime is in paper mode.' });
+      return reply.code(409).send({ error: 'Strategy data is only available while the runtime is in paper or simulation mode.' });
     }
     return paperStrategy;
   });
 
   app.get('/api/paper/strategy/snapshots', async (request, reply) => {
     const state = store.getState();
-    if (state.mode !== 'paper') {
-      return reply.code(409).send({ error: 'Paper strategy snapshots are only available while the runtime is in paper mode.' });
+    if (state.mode !== 'paper' && state.mode !== 'simulation') {
+      return reply.code(409).send({ error: 'Strategy snapshots are only available while the runtime is in paper or simulation mode.' });
     }
 
     return {
-      mode: 'paper',
+      mode: state.mode,
       safeToExpose: true,
       snapshots: store.getStrategySnapshots(readLimit(request.query, 6, 12))
     };
@@ -163,16 +176,19 @@ async function main(): Promise<void> {
     paperStrategySnapshotsEndpoint: '/api/paper/strategy/snapshots',
     upDownScanEndpoint: '/api/updown-scan',
     liveWalletEndpoint: '/api/live/wallet',
+    liveControlsAvailable: config.runtimeMode !== 'simulation',
     controlEndpoints: {
       pause: '/api/control/pause',
       resume: '/api/control/resume',
-      armLive: '/api/control/live/arm',
-      disarmLive: '/api/control/live/disarm',
+      armLive: config.runtimeMode === 'simulation' ? null : '/api/control/live/arm',
+      disarmLive: config.runtimeMode === 'simulation' ? null : '/api/control/live/disarm',
       flatten: '/api/control/flatten',
       engageKillSwitch: '/api/control/kill-switch/engage',
       releaseKillSwitch: '/api/control/kill-switch/release'
     },
-    note: 'Read endpoints are open. Paper strategy routes are sanitized and read-only. Control routes require a token. Live arming remains fail-closed until venue-backed startup reconciliation is clean.'
+    note: config.runtimeMode === 'simulation'
+      ? 'Simulation mode is active. Read endpoints are open, strategy routes are sanitized, and no live wallet/order gateway is installed.'
+      : 'Read endpoints are open. Paper strategy routes are sanitized and read-only. Control routes require a token. Live arming remains fail-closed until venue-backed startup reconciliation is clean.'
   }));
 
   app.get('/api/updown-scan', async (_request, reply) => {
@@ -236,6 +252,10 @@ async function main(): Promise<void> {
       return reply.code(401).send({ error: 'Unauthorized' });
     }
 
+    if (config.runtimeMode === 'simulation') {
+      return reply.code(409).send({ error: 'Simulation mode cannot be armed for live trading. No live wallet or order gateway is installed.' });
+    }
+
     try {
       return await store.armLive();
     } catch (error) {
@@ -246,6 +266,10 @@ async function main(): Promise<void> {
   app.post('/api/control/live/disarm', async (request, reply) => {
     if (!isAuthorized(request.headers as Record<string, unknown>)) {
       return reply.code(401).send({ error: 'Unauthorized' });
+    }
+
+    if (config.runtimeMode === 'simulation') {
+      return reply.code(409).send({ error: 'Simulation mode has no live trading path to disarm.' });
     }
 
     try {

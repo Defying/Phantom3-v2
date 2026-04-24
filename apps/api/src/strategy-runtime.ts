@@ -264,32 +264,33 @@ function buildSummaryText(
   payload: StrategyEvaluationPayload,
   exposureUsd: number
 ): string {
-  if (state.mode !== 'paper') {
+  const label = state.mode === 'simulation' ? 'Simulation' : 'Paper';
+  if (state.mode !== 'paper' && state.mode !== 'simulation') {
     return 'Strategy runtime stays sanitized until the process is explicitly armed for paper mode.';
   }
   if (state.paused) {
-    return 'Paper strategy runtime is paused. Existing paper state is preserved and no new evaluations are emitted.';
+    return `${label} strategy runtime is paused. Existing ${label.toLowerCase()} state is preserved and no new evaluations are emitted.`;
   }
   if (state.marketData.stale) {
     return state.marketData.error
-      ? `Paper strategy runtime is waiting on fresh market data: ${state.marketData.error}`
-      : 'Paper strategy runtime is waiting on fresh market data before evaluation.';
+      ? `${label} strategy runtime is waiting on fresh market data: ${state.marketData.error}`
+      : `${label} strategy runtime is waiting on fresh market data before evaluation.`;
   }
   if (state.markets.length === 0) {
-    return 'Paper strategy runtime is booted with no markets to observe yet.';
+    return `${label} strategy runtime is booted with no markets to observe yet.`;
   }
   const openIntentCount = payload.intents.filter((intent) => intent.status === 'submitted' || intent.status === 'watching').length;
-  return `Paper strategy is watching ${state.markets.length} markets, carrying ${openIntentCount} open paper intents, ${payload.positions.length} open paper positions, and ${compactUsd(exposureUsd)} open exposure.`;
+  return `${label} strategy is watching ${state.markets.length} markets, carrying ${openIntentCount} open ${label.toLowerCase()} intents, ${payload.positions.length} open ${label.toLowerCase()} positions, and ${compactUsd(exposureUsd)} open exposure.`;
 }
 
 function buildNotes(state: StrategyStateBasis, payload: StrategyEvaluationPayload): string[] {
   const notes = [
-    'Paper-only runtime. No real exchange writes are performed.',
+    state.mode === 'simulation' ? 'Simulation runtime. No wallet or exchange writes are performed.' : 'Paper-only runtime. No real exchange writes are performed.',
     'Strategy signals are conservative heuristics, not proof of edge.'
   ];
 
   if (payload.positions.length === 0) {
-    notes.push('No paper positions are open yet.');
+    notes.push(state.mode === 'simulation' ? 'No simulated positions are open yet.' : 'No paper positions are open yet.');
   }
 
   if (state.marketData.syncedAt) {
@@ -370,7 +371,7 @@ export function buildPaperStrategyView(
   snapshots: StrategyStateSnapshot[],
   limit = 6
 ): PaperStrategyView | null {
-  if (state.mode !== 'paper') {
+  if (state.mode !== 'paper' && state.mode !== 'simulation') {
     return null;
   }
 
@@ -378,7 +379,7 @@ export function buildPaperStrategyView(
   const limitedSnapshots = snapshots.slice(0, boundedLimit);
 
   return {
-    mode: 'paper',
+    mode: state.mode,
     safeToExpose: true,
     summary: state.strategy,
     latestSnapshot: limitedSnapshots[0] ?? null,

@@ -98,7 +98,7 @@ export type RuntimeStoreOptions = {
   marketFetcher?: typeof fetchTopMarkets;
 };
 
-type PositionExecutionPath = 'paper' | 'live' | 'mixed' | 'unknown';
+type PositionExecutionPath = 'simulation' | 'paper' | 'live' | 'mixed' | 'unknown';
 
 type LiveProjectionState = {
   activeOrderCount: number;
@@ -108,7 +108,7 @@ type LiveProjectionState = {
   blockingReason: string | null;
 };
 
-function buildLiveControlSummary(live: RuntimeLiveControl): string {
+function buildLiveControlSummary(live: RuntimeLiveControl, mode: RuntimeState['mode'] = 'paper'): string {
   const killSwitchSummary = live.killSwitchActive
     ? ` Kill switch is active${live.killSwitchReason ? ` (${live.killSwitchReason})` : ''}. New automated entries stay blocked until an operator clears it.`
     : '';
@@ -164,7 +164,7 @@ function createInitialLiveControl(config: AppConfig): RuntimeLiveControl {
     summary: ''
   } satisfies RuntimeLiveControl;
 
-  live.summary = buildLiveControlSummary(live);
+  live.summary = buildLiveControlSummary(live, config.runtimeMode);
   return live;
 }
 
@@ -238,8 +238,8 @@ function buildWatchlist(state: RuntimeState): WatchEntry[] {
       label: 'Paper mode only',
       status: 'active',
       note: state.execution.live.configured
-        ? `Paper execution is still authoritative while the live control plane is ${state.execution.live.armed ? 'armed' : 'disarmed'} and ${state.execution.live.status}.`
-        : 'Live trading remains disarmed by design.'
+        ? `${state.mode === 'simulation' ? 'Simulation' : 'Paper'} execution is still authoritative while the live control plane is ${state.execution.live.armed ? 'armed' : 'disarmed'} and ${state.execution.live.status}.`
+        : state.mode === 'simulation' ? 'Simulation mode is active. No wallet or exchange writes are installed.' : 'Live trading remains disarmed by design.'
     },
     {
       id: 'live-control-plane',
@@ -259,11 +259,11 @@ function buildWatchlist(state: RuntimeState): WatchEntry[] {
     },
     {
       id: 'paper-ledger',
-      label: 'Paper ledger truth',
+      label: state.mode === 'simulation' ? 'Simulation ledger truth' : 'Paper ledger truth',
       status: 'active',
       note: totalTrackedTrades > 0
         ? `Ledger tracks ${state.execution.tradeStates.pending} pending, ${state.execution.tradeStates.reconcile} reconcile, and ${state.execution.tradeStates.open} open trade state${totalTrackedTrades === 1 ? '' : 's'}.`
-        : 'Append-only paper ledger is armed and ready for paper-only execution.'
+        : state.mode === 'simulation' ? 'Append-only simulation ledger is armed and cannot place external orders.' : 'Append-only paper ledger is armed and ready for paper-only execution.'
     }
   ];
 }
@@ -281,7 +281,7 @@ function createInitialState(config: AppConfig): RuntimeState {
   const state = {
     appName: 'Wraith',
     version: '0.1.0',
-    mode: 'paper',
+    mode: config.runtimeMode,
     startedAt: now,
     lastHeartbeatAt: now,
     paused: false,
@@ -292,7 +292,7 @@ function createInitialState(config: AppConfig): RuntimeState {
     strategy: {
       engineId: 'paper-strategy-runtime',
       strategyVersion: 'paper-signal-v1',
-      mode: 'paper',
+      mode: config.runtimeMode,
       status: 'idle',
       safeToExpose: true,
       lastEvaluatedAt: null,
@@ -302,18 +302,20 @@ function createInitialState(config: AppConfig): RuntimeState {
       openIntentCount: 0,
       openPositionCount: 0,
       openExposureUsd: 0,
-      summary: 'Paper strategy runtime is waiting on fresh market data before evaluation.',
+      summary: config.runtimeMode === 'simulation' ? 'Simulation strategy runtime is waiting on fresh market data before evaluation.' : 'Paper strategy runtime is waiting on fresh market data before evaluation.',
       candidates: [],
       intents: [],
       riskDecisions: [],
       positions: [],
-      notes: ['Paper-only runtime. No real exchange writes are performed.']
+      notes: [config.runtimeMode === 'simulation' ? 'Simulation runtime. No wallet or exchange writes are performed.' : 'Paper-only runtime. No real exchange writes are performed.']
     },
     execution: {
-      requestedMode: config.liveModeEnabled ? 'live' : 'paper',
-      summary: config.liveModeEnabled
-        ? 'Live control plane is configured, but paper execution remains authoritative until a live adapter exists.'
-        : 'Paper execution remains the only writer. No ledger-backed trades have been recorded yet.',
+      requestedMode: config.runtimeMode === 'simulation' ? 'simulation' : config.liveModeEnabled ? 'live' : 'paper',
+      summary: config.runtimeMode === 'simulation'
+        ? 'Simulation execution remains the only writer. No wallet or exchange writes are possible.'
+        : config.liveModeEnabled
+          ? 'Live control plane is configured, but paper execution remains authoritative until a live adapter exists.'
+          : 'Paper execution remains the only writer. No ledger-backed trades have been recorded yet.',
       tradeStates: {
         pending: 0,
         reconcile: 0,
@@ -329,9 +331,11 @@ function createInitialState(config: AppConfig): RuntimeState {
     events: [
       event('info', 'Wraith bootstrap initialized.'),
       event('info', `Remote dashboard ${config.remoteDashboardEnabled ? 'enabled' : 'disabled'} at ${config.publicBaseUrl}`),
-      ...(config.liveModeEnabled
-        ? [event('warning', 'Live control plane is configured, but no live adapter is installed. Paper execution remains authoritative.')]
-        : []),
+      ...(config.runtimeMode === 'simulation'
+        ? [event('info', 'Simulation mode active. Wallet/live gateway construction is disabled.')]
+        : config.liveModeEnabled
+          ? [event('warning', 'Live control plane is configured, but no live adapter is installed. Paper execution remains authoritative.')]
+          : []),
       event('warning', 'Execution remains disarmed while milestone 1 builds out read-only truth first.')
     ]
   } satisfies RuntimeState;
@@ -366,8 +370,11 @@ export class RuntimeStore {
 
   constructor(private readonly config: AppConfig, options: RuntimeStoreOptions = {}) {
     this.statePath = join(config.dataDir, 'runtime-state.json');
+    if (config.runtimeMode === 'simulation' && (options.liveExchange || options.liveVenueSnapshot)) {
+      throw new Error('Simulation mode must not receive live exchange or venue snapshot dependencies.');
+    }
     this.ledger = new JsonlLedger({ directory: config.dataDir });
-    this.paperExecution = new PaperExecutionAdapter(this.ledger);
+    this.paperExecution = new PaperExecutionAdapter(this.ledger, { executionMode: config.runtimeMode === 'simulation' ? 'simulation' : 'paper' });
     this.liveVenueSnapshot = options.liveVenueSnapshot ?? null;
     this.liveSetupError = options.liveSetupError ?? null;
     this.marketFetcher = options.marketFetcher ?? fetchTopMarkets;
@@ -599,6 +606,10 @@ export class RuntimeStore {
           throw new Error(`Cannot flatten ${position.positionId}: execution provenance is ${executionPath}, so the runtime cannot prove which adapter should own the exit.`);
         }
 
+        if (this.config.runtimeMode === 'simulation' && executionPath !== 'simulation') {
+          throw new Error(`Cannot flatten ${position.positionId}: simulation mode refuses to mutate ${executionPath} provenance.`);
+        }
+
         const result = executionPath === 'live'
           ? await this.submitLiveFlatten(position, quote, projection)
           : await this.submitPaperFlatten(position, quote, observedAt);
@@ -665,12 +676,13 @@ export class RuntimeStore {
       lastHeartbeatAt: isoNow(),
       publicBaseUrl: this.config.publicBaseUrl,
       remoteDashboardEnabled: this.config.remoteDashboardEnabled,
+      mode: this.config.runtimeMode,
       marketData,
       markets,
       events,
       execution: {
         ...base.execution,
-        requestedMode: live.configured ? 'live' : 'paper',
+        requestedMode: this.config.runtimeMode === 'simulation' ? 'simulation' : live.configured ? 'live' : 'paper',
         live,
         tradeStates: base.execution.tradeStates,
         trades: [],
@@ -728,7 +740,7 @@ export class RuntimeStore {
       summary: ''
     } satisfies RuntimeLiveControl;
 
-    live.summary = buildLiveControlSummary(live);
+    live.summary = buildLiveControlSummary(live, this.config.runtimeMode);
     return live;
   }
 
@@ -841,10 +853,10 @@ export class RuntimeStore {
       summary: ''
     } satisfies RuntimeLiveControl;
 
-    normalized.summary = buildLiveControlSummary(normalized);
+    normalized.summary = buildLiveControlSummary(normalized, this.config.runtimeMode);
     this.state.execution = {
       ...this.state.execution,
-      requestedMode: normalized.configured ? 'live' : 'paper',
+      requestedMode: this.config.runtimeMode === 'simulation' ? 'simulation' : normalized.configured ? 'live' : 'paper',
       live: normalized
     };
   }
@@ -946,7 +958,7 @@ export class RuntimeStore {
       summary: ''
     } satisfies RuntimeLiveControl;
 
-    live.summary = buildLiveControlSummary(live);
+    live.summary = buildLiveControlSummary(live, this.config.runtimeMode);
     return live;
   }
 
@@ -996,7 +1008,7 @@ export class RuntimeStore {
 
     for (const lot of position.lots) {
       const mode = fillMap.get(lot.sourceFillId);
-      if (mode === 'paper' || mode === 'live') {
+      if (mode === 'simulation' || mode === 'paper' || mode === 'live') {
         fillModes.add(mode);
       }
     }
@@ -1142,7 +1154,7 @@ export class RuntimeStore {
     }
 
     return {
-      sessionId: 'wraith-paper-runtime',
+      sessionId: this.config.runtimeMode === 'simulation' ? 'wraith-simulation-runtime' : 'wraith-paper-runtime',
       intentId: createRuntimeIntentId(input.intent),
       strategyId: input.intent.strategyId,
       marketId: input.intent.marketId,

@@ -64,3 +64,29 @@ Useful sweep knobs:
 - `WRAITH_UPDOWN_SIM_MIN_TRADES=20` once enough observations exist
 
 A threshold set is not interesting until it has enough resolved samples and stays positive after spread/slippage assumptions. Tiny sample wins are noise.
+
+## Realistic backtest requirements
+
+Midpoint-only simulation is not enough to prove edge. Before any live-capital canary, Wraith needs a book-aware replay path that records enough public Polymarket/CLOB state to simulate executable fills.
+
+Capture per market:
+
+- Gamma/Gamma-public identity: event id, market id, slug, question, condition id, outcome labels, CLOB token ids, start/end dates, active/closed state, description, resolution source, and URL.
+- CLOB metadata: token-to-outcome mapping, min order size, tick size, fee rate, order delay flags, and exchange server time.
+- Order book snapshots/events: full depth or at least enough bid/ask levels to fill the target simulated size, with token id, condition id, orderbook hash, exchange timestamp, and local receive timestamp.
+- Resolution facts: market-specific oracle/source prices at start/end and equality rule. Coinbase remains proxy-only unless the market explicitly resolves from Coinbase.
+
+Execution simulation rules:
+
+- Never fill at midpoint.
+- Simulated buys walk asks from lowest price upward; simulated sells walk bids from highest price downward.
+- Model partial fills, VWAP, slippage, fees, tick rounding, min order size, and signal-to-execution latency.
+- Treat `/prices-history` as chart context only, not realistic fill data.
+- Validate reconstructed books against CLOB `/book`, WS `best_bid_ask`, actual trades, and final `market_resolved` winning token.
+
+Safety invariants for zero-dollar mode:
+
+- Use only public read endpoints and public market WebSocket subscriptions.
+- Do not load private keys, L2 API credentials, signer, funder, or wallet state.
+- Hard-block authenticated CLOB order/cancel/balance/allowance paths.
+- Tests should prove outbound non-GET/WS trading writes are zero and no auth headers are attached.

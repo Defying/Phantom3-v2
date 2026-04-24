@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-export const runtimeModeSchema = z.enum(['paper', 'live-disarmed']);
+export const runtimeModeSchema = z.enum(['simulation', 'paper', 'live-disarmed']);
 export type RuntimeMode = z.infer<typeof runtimeModeSchema>;
 
 export const moduleStatusSchema = z.enum(['healthy', 'idle', 'warning', 'blocked']);
@@ -120,7 +120,7 @@ export const paperPositionSummarySchema = z.object({
 });
 export type PaperPositionSummary = z.infer<typeof paperPositionSummarySchema>;
 
-export const requestedRuntimeModeSchema = z.enum(['paper', 'live']);
+export const requestedRuntimeModeSchema = z.enum(['simulation', 'paper', 'live']);
 export type RequestedRuntimeMode = z.infer<typeof requestedRuntimeModeSchema>;
 
 export const runtimeTradeStatusSchema = z.enum(['pending', 'reconcile', 'open', 'closed', 'error']);
@@ -230,7 +230,7 @@ export const strategyStateSnapshotSchema = z.object({
 export type StrategyStateSnapshot = z.infer<typeof strategyStateSnapshotSchema>;
 
 export const paperStrategyViewSchema = z.object({
-  mode: z.literal('paper'),
+  mode: z.enum(['simulation', 'paper']),
   safeToExpose: z.literal(true),
   summary: strategyRuntimeSummarySchema,
   latestSnapshot: strategyStateSnapshotSchema.nullable(),

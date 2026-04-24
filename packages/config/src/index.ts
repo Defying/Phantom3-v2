@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { runtimeModeSchema, type RuntimeMode } from '../../contracts/src/index.js';
 
 export const ethereumAddressSchema = z.string().regex(/^0x[a-fA-F0-9]{40}$/, 'Expected a 0x-prefixed 20-byte Ethereum address.');
 export const ethereumPrivateKeySchema = z.string().regex(/^0x[a-fA-F0-9]{64}$/, 'Expected a 0x-prefixed 32-byte hex private key.');
@@ -32,6 +33,7 @@ const envSchema = z.object({
   WRAITH_LOG_DIR: z.string().default('./logs'),
   WRAITH_MARKET_REFRESH_MS: z.coerce.number().int().positive().default(30000),
   WRAITH_MARKET_LIMIT: z.coerce.number().int().positive().max(24).default(16),
+  WRAITH_RUNTIME_MODE: runtimeModeSchema.default('paper'),
   WRAITH_ENABLE_LIVE_MODE: z.string().default('false'),
   WRAITH_ENABLE_LIVE_ARMING: z.string().default('false'),
   WRAITH_LIVE_EXECUTION_ENABLED: z.string().default('false'),
@@ -108,6 +110,7 @@ export type AppConfig = {
   logDir: string;
   marketRefreshMs: number;
   marketLimit: number;
+  runtimeMode: RuntimeMode;
   liveModeEnabled: boolean;
   liveArmingEnabled: boolean;
   liveExecution: LiveExecutionAppConfig;
@@ -139,6 +142,27 @@ function readPolymarketApiCredentials(parsed: z.infer<typeof polymarketEnvSchema
     secret,
     passphrase
   });
+}
+
+
+function readDisabledPolymarketLiveVenueConfig(parsed: z.infer<typeof polymarketEnvSchema>): PolymarketLiveVenueConfig {
+  return {
+    host: parsed.WRAITH_POLYMARKET_CLOB_HOST,
+    chainId: polymarketChainIdSchema.parse(parsed.WRAITH_POLYMARKET_CHAIN_ID),
+    useServerTime: readFlag(parsed.WRAITH_POLYMARKET_USE_SERVER_TIME),
+    auth: {
+      signatureType: 0,
+      funderAddress: null,
+      privateKey: null,
+      allowApiKeyDerivation: false,
+      apiCredentials: null,
+      hasPrivateKey: false,
+      hasApiCredentials: false,
+      needsApiKeyDerivation: false,
+      canAccessAuthenticatedApi: false,
+      canPlaceOrders: false
+    }
+  };
 }
 
 function readPolymarketLiveVenueConfigFromParsedEnv(parsed: z.infer<typeof polymarketEnvSchema>): PolymarketLiveVenueConfig {
@@ -189,7 +213,9 @@ export function readPolymarketLiveVenueConfig(env: Record<string, string | undef
 
 export function readConfig(): AppConfig {
   const parsed = envSchema.parse(withLegacyPhantomEnv(process.env));
-  const liveModeEnabled = readFlag(parsed.WRAITH_ENABLE_LIVE_MODE);
+  const runtimeMode = parsed.WRAITH_RUNTIME_MODE;
+  const simulationMode = runtimeMode === 'simulation';
+  const liveModeEnabled = !simulationMode && (runtimeMode === 'live-disarmed' || readFlag(parsed.WRAITH_ENABLE_LIVE_MODE));
 
   return {
     host: parsed.WRAITH_HOST,
@@ -200,15 +226,16 @@ export function readConfig(): AppConfig {
     logDir: parsed.WRAITH_LOG_DIR,
     marketRefreshMs: parsed.WRAITH_MARKET_REFRESH_MS,
     marketLimit: parsed.WRAITH_MARKET_LIMIT,
+    runtimeMode,
     liveModeEnabled,
     liveArmingEnabled: liveModeEnabled && readFlag(parsed.WRAITH_ENABLE_LIVE_ARMING),
     liveExecution: {
-      enabled: readFlag(parsed.WRAITH_LIVE_EXECUTION_ENABLED),
+      enabled: !simulationMode && readFlag(parsed.WRAITH_LIVE_EXECUTION_ENABLED),
       venue: parsed.WRAITH_LIVE_EXECUTION_VENUE,
       maxQuoteAgeMs: parsed.WRAITH_LIVE_MAX_QUOTE_AGE_MS,
       maxReconcileAgeMs: parsed.WRAITH_LIVE_MAX_RECONCILE_AGE_MS,
       missingOrderGraceMs: parsed.WRAITH_LIVE_MISSING_ORDER_GRACE_MS,
-      polymarket: readPolymarketLiveVenueConfigFromParsedEnv(parsed)
+      polymarket: simulationMode ? readDisabledPolymarketLiveVenueConfig(parsed) : readPolymarketLiveVenueConfigFromParsedEnv(parsed)
     },
     controlToken: parsed.WRAITH_CONTROL_TOKEN
   };

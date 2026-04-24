@@ -6,7 +6,7 @@ const quantitySchema = z.number().positive().finite();
 const nonNegativeNumberSchema = z.number().nonnegative().finite();
 const signedNumberSchema = z.number().finite();
 
-export const executionModeSchema = z.enum(['paper', 'live']);
+export const executionModeSchema = z.enum(['simulation', 'paper', 'live']);
 export type ExecutionMode = z.infer<typeof executionModeSchema>;
 
 export const tradeSideSchema = z.enum(['buy', 'sell']);

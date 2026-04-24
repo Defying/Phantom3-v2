@@ -59,3 +59,31 @@ test('readPolymarketLiveVenueConfig requires a funder address for non-EOA signat
     /FUNDER_ADDRESS/i
   );
 });
+
+
+test('readConfig simulation mode forces live execution disabled even with live flags present', async () => {
+  const previous = { ...process.env };
+  try {
+    process.env = {
+      ...previous,
+      WRAITH_RUNTIME_MODE: 'simulation',
+      WRAITH_ENABLE_LIVE_MODE: 'true',
+      WRAITH_ENABLE_LIVE_ARMING: 'true',
+      WRAITH_LIVE_EXECUTION_ENABLED: 'true',
+      WRAITH_POLYMARKET_PRIVATE_KEY: 'not-a-private-key',
+      WRAITH_POLYMARKET_API_KEY: 'partial-key-is-ignored-in-sim',
+      WRAITH_CONTROL_TOKEN: '1234567890abcdef'
+    };
+    const { readConfig } = await import(`./index.js?simulation-test-${Date.now()}`);
+    const config = readConfig();
+    assert.equal(config.runtimeMode, 'simulation');
+    assert.equal(config.liveModeEnabled, false);
+    assert.equal(config.liveArmingEnabled, false);
+    assert.equal(config.liveExecution.enabled, false);
+    assert.equal(config.liveExecution.polymarket.auth.privateKey, null);
+    assert.equal(config.liveExecution.polymarket.auth.hasPrivateKey, false);
+    assert.equal(config.liveExecution.polymarket.auth.canPlaceOrders, false);
+  } finally {
+    process.env = previous;
+  }
+});

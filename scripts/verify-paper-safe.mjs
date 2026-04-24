@@ -64,8 +64,9 @@ await expectMatch(
   /WRAITH_CONTROL_TOKEN:\s*z\.string\(\)\.min\(16/,
   'control token minimum length is enforced'
 );
-await expectIncludes('packages/contracts/src/index.ts', "runtimeModeSchema = z.enum(['paper', 'live-disarmed'])", 'runtime contract remains paper/live-disarmed only');
-await expectMatch('apps/api/src/runtime-store.ts', /mode:\s*'paper'/, 'runtime store defaults to paper mode');
+await expectIncludes('packages/contracts/src/index.ts', "runtimeModeSchema = z.enum(['simulation', 'paper', 'live-disarmed'])", 'runtime contract supports simulation/paper/live-disarmed only');
+await expectMatch('packages/config/src/index.ts', /WRAITH_RUNTIME_MODE:\s*runtimeModeSchema\.default\('paper'\)/, 'runtime config defaults to paper mode');
+await expectIncludes('apps/api/src/runtime-store.ts', 'mode: config.runtimeMode', 'runtime store uses parsed runtime mode');
 await expectIncludes('apps/api/src/runtime-store.ts', "label: 'Paper mode only'", 'runtime watchlist still advertises paper-only mode');
 await expectIncludes('apps/api/src/runtime-store.ts', 'Live trading remains disarmed by design.', 'runtime event log still documents live-disarmed posture');
 await expectIncludes('apps/api/src/runtime-store.ts', 'Live execution intentionally not implemented in milestone 1.', 'execution module remains blocked in the bootstrap runtime');

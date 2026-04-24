@@ -216,7 +216,7 @@ export function createRuntimeExecutionSummary(
   const tradeStates = countTradeStates(trades);
 
   return {
-    requestedMode: live.configured ? 'live' : 'paper',
+    requestedMode: state.mode === 'simulation' ? 'simulation' : live.configured ? 'live' : 'paper',
     summary: summarizeExecution(state, live, tradeStates),
     tradeStates,
     trades,

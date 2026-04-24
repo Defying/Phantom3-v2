@@ -13,6 +13,7 @@ import {
   type LiquidityRole,
   type OrderStatus,
   type OrderUpdatedEvent,
+  type ExecutionMode,
   type PaperLedgerEvent,
   type PaperQuote,
   type PositionUpdatedEvent,
@@ -26,6 +27,7 @@ export type PaperExecutionAdapterOptions = {
   liquidityRole?: LiquidityRole;
   clock?: () => Date;
   idFactory?: () => string;
+  executionMode?: Extract<ExecutionMode, 'simulation' | 'paper'>;
 };
 
 export type SubmitApprovedIntentInput = {
@@ -65,6 +67,7 @@ export class PaperExecutionAdapter {
   private readonly liquidityRole: LiquidityRole;
   private readonly clock: () => Date;
   private readonly idFactory: () => string;
+  private readonly executionMode: Extract<ExecutionMode, 'simulation' | 'paper'>;
 
   constructor(
     private readonly ledger: JsonlLedger,
@@ -76,6 +79,7 @@ export class PaperExecutionAdapter {
     this.liquidityRole = options.liquidityRole ?? DEFAULTS.liquidityRole;
     this.clock = options.clock ?? (() => new Date());
     this.idFactory = options.idFactory ?? randomUUID;
+    this.executionMode = options.executionMode ?? 'paper';
 
     if (!Number.isFinite(this.maxQuoteAgeMs) || this.maxQuoteAgeMs < 0) {
       throw new Error(`PaperExecutionAdapter maxQuoteAgeMs must be >= 0, received ${this.maxQuoteAgeMs}.`);
@@ -104,7 +108,7 @@ export class PaperExecutionAdapter {
       eventId: this.makeId('evt'),
       recordedAt: intent.approvedAt ?? now,
       sessionId: intent.sessionId,
-      executionMode: 'paper',
+      executionMode: this.executionMode,
       marketId: intent.marketId,
       tokenId: intent.tokenId,
       intentId: intent.intentId,
@@ -121,12 +125,12 @@ export class PaperExecutionAdapter {
 
     const reservedSellQuantity = this.getReservedSellQuantity(projection, intent.marketId, intent.tokenId);
     const rawPosition = projection.positions.get(positionKeyFor(intent.marketId, intent.tokenId));
-    if (rawPosition && rawPosition.executionMode !== 'paper') {
+    if (rawPosition && rawPosition.executionMode !== this.executionMode) {
       throw new Error(
         `Cannot route paper order ${intent.intentId} while ${rawPosition.executionMode} state owns ${rawPosition.positionId}.`
       );
     }
-    const position = rawPosition?.executionMode === 'paper' ? rawPosition : undefined;
+    const position = rawPosition?.executionMode === this.executionMode ? rawPosition : undefined;
     const availableToSell = Math.max(0, (position?.netQuantity ?? 0) - reservedSellQuantity);
 
     if (intent.side === 'sell' && availableToSell + LEDGER_EPSILON < intent.quantity) {
@@ -193,7 +197,7 @@ export class PaperExecutionAdapter {
           eventId: this.makeId('evt'),
           recordedAt: now,
           sessionId: intent.sessionId,
-          executionMode: 'paper',
+          executionMode: this.executionMode,
           marketId: intent.marketId,
           tokenId: intent.tokenId,
           positionId: preview.position.positionId,
@@ -248,7 +252,7 @@ export class PaperExecutionAdapter {
 
     const projection = await this.ledger.readProjection();
     const openOrders = getOpenOrders(projection, {
-      executionMode: 'paper',
+      executionMode: this.executionMode,
       marketId: quote.marketId,
       tokenId: quote.tokenId
     });
@@ -258,14 +262,14 @@ export class PaperExecutionAdapter {
         quote,
         envelopes: [],
         filledOrderIds: [],
-        skippedReason: 'No open paper orders for this market/token.'
+        skippedReason: 'No open simulated orders for this market/token.'
       };
     }
 
     const events: PaperLedgerEvent[] = [];
     const filledOrderIds: string[] = [];
     const positionState = new Map(
-      [...projection.positions.entries()].filter(([, position]) => position.executionMode === 'paper')
+      [...projection.positions.entries()].filter(([, position]) => position.executionMode === this.executionMode)
     );
     let remainingAskLiquidity = this.normalizeLiquidity(quote.askSize);
     let remainingBidLiquidity = this.normalizeLiquidity(quote.bidSize);
@@ -334,7 +338,7 @@ export class PaperExecutionAdapter {
         eventId: this.makeId('evt'),
         recordedAt: fillEvent.recordedAt,
         sessionId: order.sessionId,
-        executionMode: 'paper',
+        executionMode: this.executionMode,
         marketId: order.marketId,
         tokenId: order.tokenId,
         positionId: preview.position.positionId,
@@ -365,7 +369,7 @@ export class PaperExecutionAdapter {
         quote,
         envelopes: [],
         filledOrderIds: [],
-        skippedReason: 'Open paper orders did not cross the current quote.'
+        skippedReason: 'Open simulated orders did not cross the current quote.'
       };
     }
 
@@ -439,7 +443,7 @@ export class PaperExecutionAdapter {
       eventId: this.makeId('evt'),
       recordedAt: args.recordedAt,
       sessionId: args.intent.sessionId,
-      executionMode: 'paper',
+      executionMode: this.executionMode,
       marketId: args.intent.marketId,
       tokenId: args.intent.tokenId,
       intentId: args.intent.intentId,
@@ -473,7 +477,7 @@ export class PaperExecutionAdapter {
       eventId: this.makeId('evt'),
       recordedAt: args.recordedAt,
       sessionId: args.intent.sessionId,
-      executionMode: 'paper',
+      executionMode: this.executionMode,
       marketId: args.intent.marketId,
       tokenId: args.intent.tokenId,
       intentId: args.intent.intentId,
@@ -496,7 +500,7 @@ export class PaperExecutionAdapter {
       orderId: order.orderId,
       intentId: order.intentId,
       sessionId: order.sessionId,
-      executionMode: 'paper',
+      executionMode: this.executionMode,
       marketId: order.marketId,
       tokenId: order.tokenId,
       side: order.side,
@@ -525,7 +529,7 @@ export class PaperExecutionAdapter {
     marketId: string,
     tokenId: string
   ): number {
-    return getOpenOrders(projection, { executionMode: 'paper', marketId, tokenId })
+    return getOpenOrders(projection, { executionMode: this.executionMode, marketId, tokenId })
       .filter((order) => order.side === 'sell')
       .reduce((sum, order) => sum + order.remainingQuantity, 0);
   }
