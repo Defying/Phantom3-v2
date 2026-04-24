@@ -1,6 +1,6 @@
-# Phantom3 v2 Overview
+# Wraith Overview
 
-This repo is the first executable milestone of the Phantom3 v2 rebuild.
+This repo is the first executable milestone of the Wraith rebuild.
 
 ## Implemented today
 

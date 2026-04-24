@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { ModuleStatus, RuntimeState } from '../../../packages/contracts/src/index';
 
-const tokenStorageKey = 'phantom3-v2-control-token';
+const tokenStorageKey = 'wraith-control-token';
 const compactNumber = new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 1 });
 
 const candidateIntentPaths = [
@@ -28,6 +28,14 @@ const paperPositionPaths = [
 
 type SocketState = 'connecting' | 'live' | 'reconnecting' | 'offline';
 type Tone = ModuleStatus | 'info';
+type ControlPath =
+  | '/api/control/pause'
+  | '/api/control/resume'
+  | '/api/control/live/arm'
+  | '/api/control/live/disarm'
+  | '/api/control/flatten'
+  | '/api/control/kill-switch/engage'
+  | '/api/control/kill-switch/release';
 type LooseRecord = Record<string, unknown>;
 
 type RuntimeEnvelope = {
@@ -65,10 +73,47 @@ type DetailSectionProps = {
   items: DetailCard[];
 };
 
+type UpDownDecision = 'CANDIDATE' | 'WATCH' | 'SKIP';
+
+type UpDownScanRow = {
+  decision: UpDownDecision;
+  blockers: string[];
+  asset: 'BTC' | 'ETH' | 'SOL';
+  window: '5m' | '15m';
+  minutesToEnd: number;
+  side: 'Up' | 'Down';
+  sidePrice: number | null;
+  yes: number | null;
+  no: number | null;
+  coinbaseOpen: number;
+  coinbaseCurrent: number;
+  moveBps: number;
+  spread: number | null;
+  liquidity: number | null;
+  volume24hr: number | null;
+  question: string;
+  slug: string;
+  url: string;
+};
+
+type UpDownScanResult = {
+  scannedAt: string;
+  note: string;
+  rows: UpDownScanRow[];
+};
+
 async function fetchRuntime(): Promise<RuntimeState> {
   const response = await fetch('/api/runtime');
   if (!response.ok) {
     throw new Error('Failed to fetch runtime');
+  }
+  return response.json();
+}
+
+async function fetchUpDownScan(): Promise<UpDownScanResult> {
+  const response = await fetch('/api/updown-scan');
+  if (!response.ok) {
+    throw new Error('Failed to scan Up/Down markets');
   }
   return response.json();
 }
@@ -372,6 +417,60 @@ function buildPaperPositionCards(runtime: RuntimeState | null): DetailCard[] {
   });
 }
 
+function UpDownScanPanel({ scan, loading, onRefresh }: { scan: UpDownScanResult | null; loading: boolean; onRefresh: () => void }) {
+  const visibleRows = scan?.rows.slice(0, 9) ?? [];
+  const candidateCount = scan?.rows.filter((row) => row.decision === 'CANDIDATE').length ?? 0;
+  const watchCount = scan?.rows.filter((row) => row.decision === 'WATCH').length ?? 0;
+  const topDecision = candidateCount ? 'CANDIDATE' : watchCount ? 'WATCH' : 'SKIP';
+  const tone = topDecision === 'CANDIDATE' ? 'healthy' : topDecision === 'WATCH' ? 'warning' : 'blocked';
+
+  return (
+    <section className="card updown-card">
+      <div className="section-head section-head-stack">
+        <div>
+          <p className="eyebrow">Crypto Up/Down scanner</p>
+          <h2>{candidateCount ? `${candidateCount} candidate${candidateCount === 1 ? '' : 's'}` : watchCount ? `${watchCount} watch setup${watchCount === 1 ? '' : 's'}` : 'No trade right now'}</h2>
+        </div>
+        <div className="scan-actions">
+          <span className={`status-pill ${tone}`}>{topDecision}</span>
+          <button className="secondary compact-button" disabled={loading} onClick={onRefresh}>{loading ? 'Scanning...' : 'Refresh'}</button>
+        </div>
+      </div>
+      <p className="subtle">{scan?.note ?? 'Waiting for the first BTC/ETH/SOL 5m + 15m scan.'}</p>
+      <div className="summary-strip">
+        <div className="summary-tile"><span>Candidates</span><strong>{candidateCount}</strong></div>
+        <div className="summary-tile"><span>Watch</span><strong>{watchCount}</strong></div>
+        <div className="summary-tile"><span>Scanned</span><strong>{scan ? scan.rows.length : '...'}</strong></div>
+        <div className="summary-tile"><span>Updated</span><strong>{scan?.scannedAt ? new Date(scan.scannedAt).toLocaleTimeString() : '...'}</strong></div>
+      </div>
+      {visibleRows.length ? (
+        <div className="updown-grid">
+          {visibleRows.map((row) => (
+            <article className="detail-card updown-row" key={row.slug}>
+              <div className="detail-card-head">
+                <div>
+                  <h3>{row.asset} {row.window} · {row.side}</h3>
+                  <p>{row.minutesToEnd.toFixed(1)}m left · move {row.moveBps.toFixed(2)} bps · entry {formatPercent(row.sidePrice)}</p>
+                </div>
+                <span className={`badge ${row.decision === 'CANDIDATE' ? 'healthy' : row.decision === 'WATCH' ? 'warning' : 'blocked'}`}>{row.decision}</span>
+              </div>
+              <div className="field-grid">
+                <div className="field-chip"><span>Up / Down</span><strong>{formatPercent(row.yes)} / {formatPercent(row.no)}</strong></div>
+                <div className="field-chip"><span>Spread</span><strong>{formatPercent(row.spread)}</strong></div>
+                <div className="field-chip"><span>Liquidity</span><strong>{formatMaybeMoney(row.liquidity)}</strong></div>
+                <div className="field-chip"><span>Blockers</span><strong>{row.blockers.length ? row.blockers.join(', ') : 'none'}</strong></div>
+              </div>
+              <a className="market-link" href={row.url} target="_blank" rel="noreferrer">open market</a>
+            </article>
+          ))}
+        </div>
+      ) : (
+        <div className="empty-state">No scan rows yet.</div>
+      )}
+    </section>
+  );
+}
+
 function DetailSection({ eyebrow, title, subtitle, emptyState, items }: DetailSectionProps) {
   return (
     <article className="card">
@@ -421,6 +520,25 @@ export function App() {
   const [token, setToken] = useState(() => localStorage.getItem(tokenStorageKey) ?? '');
   const [busy, setBusy] = useState(false);
   const [socketState, setSocketState] = useState<SocketState>('connecting');
+  const [incidentReason, setIncidentReason] = useState('operator-requested');
+  const [upDownScan, setUpDownScan] = useState<UpDownScanResult | null>(null);
+  const [upDownLoading, setUpDownLoading] = useState(false);
+
+  const refreshUpDownScan = async () => {
+    setUpDownLoading(true);
+    try {
+      setUpDownScan(await fetchUpDownScan());
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Up/Down scan failed');
+    } finally {
+      setUpDownLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void refreshUpDownScan();
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -511,8 +629,16 @@ export function App() {
   const riskDecisions = useMemo(() => buildRiskDecisionCards(runtime), [runtime]);
   const paperPositions = useMemo(() => buildPaperPositionCards(runtime), [runtime]);
   const strategyPanel = useMemo(() => extractStrategyPanel(runtime), [runtime]);
+  const liveControl = runtime?.execution.live ?? null;
+  const liveTone = useMemo<Tone>(() => {
+    if (!liveControl) return 'idle';
+    if (liveControl.status === 'blocked-by-reconcile') return 'blocked';
+    if (liveControl.killSwitchActive || liveControl.status === 'scaffold') return 'warning';
+    if (liveControl.status === 'adapter-ready') return liveControl.armed ? 'healthy' : 'info';
+    return 'idle';
+  }, [liveControl]);
 
-  const sendControl = async (path: '/api/control/pause' | '/api/control/resume') => {
+  const sendControl = async (path: ControlPath, body?: Record<string, unknown>) => {
     if (!token) {
       setError('Control token required for write actions.');
       return;
@@ -522,8 +648,10 @@ export function App() {
       const response = await fetch(path, {
         method: 'POST',
         headers: {
-          'x-phantom3-token': token
-        }
+          'x-wraith-token': token,
+          ...(body ? { 'content-type': 'application/json' } : {})
+        },
+        body: body ? JSON.stringify(body) : undefined
       });
       if (!response.ok) {
         const payload = await response.json().catch(() => ({}));
@@ -543,7 +671,7 @@ export function App() {
     <main className="page">
       <section className="hero card">
         <div>
-          <p className="eyebrow">Phantom3 v2</p>
+          <p className="eyebrow">Wraith</p>
           <h1>Phone-ready observer dashboard</h1>
           <p className="subtle">
             Safe-by-default v2 control plane. Market truth is now read live from Polymarket, while write actions remain token-gated.
@@ -582,6 +710,8 @@ export function App() {
         </article>
       </section>
 
+      <UpDownScanPanel scan={upDownScan} loading={upDownLoading} onRefresh={() => void refreshUpDownScan()} />
+
       <section className="card">
         <div className="section-head section-head-stack">
           <div>
@@ -619,6 +749,49 @@ export function App() {
             ))}
           </div>
         ) : null}
+      </section>
+
+      <section className="card">
+        <div className="section-head section-head-stack">
+          <div>
+            <p className="eyebrow">Live control plane</p>
+            <h2>{liveControl ? humanizeKey(liveControl.status) : 'Loading live controls'}</h2>
+          </div>
+          <span className={`status-pill ${liveTone}`}>{liveControl?.armed ? 'armed' : liveControl ? 'disarmed' : 'loading'}</span>
+        </div>
+        <p className="subtle">{liveControl?.summary ?? 'Waiting for live control state.'}</p>
+        <div className="summary-strip">
+          <div className="summary-tile">
+            <span>Adapter</span>
+            <strong>{liveControl ? (liveControl.liveAdapterReady ? 'ready' : liveControl.configured ? 'scaffold' : 'paper-only') : '...'}</strong>
+          </div>
+          <div className="summary-tile">
+            <span>Can arm</span>
+            <strong>{liveControl ? (liveControl.canArm ? 'yes' : 'no') : '...'}</strong>
+          </div>
+          <div className="summary-tile">
+            <span>Flatten path</span>
+            <strong>{liveControl ? humanizeKey(liveControl.flattenPath) : '...'}</strong>
+          </div>
+          <div className="summary-tile">
+            <span>Kill switch</span>
+            <strong>{liveControl?.killSwitchActive ? 'latched' : 'clear'}</strong>
+          </div>
+        </div>
+        <div className="field-grid field-grid-spacious">
+          <div className="field-chip">
+            <span>Blocking reason</span>
+            <strong>{liveControl?.blockingReason ?? 'none'}</strong>
+          </div>
+          <div className="field-chip">
+            <span>Last operator action</span>
+            <strong>
+              {liveControl?.lastOperatorAction
+                ? `${humanizeKey(liveControl.lastOperatorAction)}${liveControl.lastOperatorActionAt ? ` · ${new Date(liveControl.lastOperatorActionAt).toLocaleString()}` : ''}`
+                : 'none'}
+            </strong>
+          </div>
+        </div>
       </section>
 
       <section className="grid two-up">
@@ -695,16 +868,69 @@ export function App() {
             <span>Control token</span>
             <input
               type="password"
-              placeholder="Paste token to enable pause/resume"
+              placeholder="Paste token to enable controls"
               value={token}
               onChange={(event) => setToken(event.target.value)}
             />
           </label>
-          <div className="button-row">
-            <button disabled={busy || loading} onClick={() => void sendControl('/api/control/pause')}>Pause</button>
-            <button className="secondary" disabled={busy || loading} onClick={() => void sendControl('/api/control/resume')}>Resume</button>
+          <label className="token-field control-note-field">
+            <span>Kill-switch / incident note</span>
+            <input
+              type="text"
+              placeholder="operator-requested"
+              value={incidentReason}
+              onChange={(event) => setIncidentReason(event.target.value)}
+            />
+          </label>
+          <div className="control-group">
+            <span>Runtime</span>
+            <div className="button-row">
+              <button disabled={busy || loading} onClick={() => void sendControl('/api/control/pause')}>Pause</button>
+              <button className="secondary" disabled={busy || loading} onClick={() => void sendControl('/api/control/resume')}>Resume</button>
+            </div>
           </div>
-          <p className="subtle small">Live trading is not wired in this bootstrap. These controls only affect the prototype runtime state.</p>
+          <div className="control-group">
+            <span>Live arming</span>
+            <div className="button-row">
+              <button disabled={busy || loading || !liveControl?.canArm} onClick={() => void sendControl('/api/control/live/arm')}>Arm live</button>
+              <button className="secondary" disabled={busy || loading || !liveControl?.armed} onClick={() => void sendControl('/api/control/live/disarm')}>Disarm live</button>
+            </div>
+          </div>
+          <div className="control-group">
+            <span>Flatten</span>
+            <div className="button-row">
+              <button
+                className={liveControl?.flattenPath === 'live' ? '' : 'secondary'}
+                disabled={busy || loading || !liveControl?.flattenSupported}
+                onClick={() => void sendControl('/api/control/flatten')}
+              >
+                {liveControl?.flattenPath === 'live'
+                  ? 'Reduce-only flatten'
+                  : liveControl?.flattenPath === 'paper'
+                    ? 'Flatten paper positions'
+                    : 'Flatten blocked'}
+              </button>
+            </div>
+          </div>
+          <div className="control-group">
+            <span>Incident control</span>
+            <div className="button-row">
+              <button
+                disabled={busy || loading || Boolean(liveControl?.killSwitchActive)}
+                onClick={() => void sendControl('/api/control/kill-switch/engage', { reason: incidentReason || 'operator-requested' })}
+              >
+                Engage kill switch
+              </button>
+              <button
+                className="secondary"
+                disabled={busy || loading || !liveControl?.killSwitchActive}
+                onClick={() => void sendControl('/api/control/kill-switch/release')}
+              >
+                Release kill switch
+              </button>
+            </div>
+          </div>
+          <p className="subtle small">{liveControl?.summary ?? 'Waiting for control readiness.'}</p>
         </article>
 
         <article className="card">

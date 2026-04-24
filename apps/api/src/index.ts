@@ -6,6 +6,7 @@ import fastifyWebsocket from '@fastify/websocket';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readConfig } from '../../../packages/config/src/index.js';
+import { scanUpDownEdge } from '../../../packages/market-data/src/updown-edge.js';
 import { RuntimeStore } from './runtime-store.js';
 
 const config = readConfig();
@@ -20,8 +21,9 @@ function isAuthorized(headers: Record<string, unknown>): boolean {
   const bearer = typeof headers.authorization === 'string' && headers.authorization.startsWith('Bearer ')
     ? headers.authorization.slice('Bearer '.length)
     : null;
-  const headerToken = typeof headers['x-phantom3-token'] === 'string' ? headers['x-phantom3-token'] : null;
-  const supplied = bearer || headerToken;
+  const wraithHeaderToken = typeof headers['x-wraith-token'] === 'string' ? headers['x-wraith-token'] : null;
+  const legacyHeaderToken = typeof headers['x-phantom3-token'] === 'string' ? headers['x-phantom3-token'] : null;
+  const supplied = bearer || wraithHeaderToken || legacyHeaderToken;
   return typeof supplied === 'string' && supplied.length > 0 && supplied === config.controlToken;
 }
 
@@ -58,7 +60,7 @@ async function main(): Promise<void> {
     const state = store.getState();
     return {
       ok: true,
-      app: 'Phantom3 v2',
+      app: 'Wraith',
       mode: state.mode,
       markets: state.markets.length,
       marketDataStale: state.marketData.stale,
@@ -102,6 +104,7 @@ async function main(): Promise<void> {
     executionSummaryEndpoint: '/api/runtime/execution',
     paperStrategyEndpoint: '/api/paper/strategy',
     paperStrategySnapshotsEndpoint: '/api/paper/strategy/snapshots',
+    upDownScanEndpoint: '/api/updown-scan',
     controlEndpoints: {
       pause: '/api/control/pause',
       resume: '/api/control/resume',
@@ -111,8 +114,16 @@ async function main(): Promise<void> {
       engageKillSwitch: '/api/control/kill-switch/engage',
       releaseKillSwitch: '/api/control/kill-switch/release'
     },
-    note: 'Read endpoints are open. Paper strategy routes are sanitized and read-only. Control routes require a token.'
+    note: 'Read endpoints are open. Paper strategy routes are sanitized and read-only. Control routes require a token. Live arming remains fail-closed until venue-backed startup reconciliation is clean.'
   }));
+
+  app.get('/api/updown-scan', async (_request, reply) => {
+    try {
+      return await scanUpDownEdge();
+    } catch (error) {
+      return reply.code(502).send({ error: error instanceof Error ? error.message : 'Unable to scan Up/Down markets.' });
+    }
+  });
 
   app.get('/api/ws', { websocket: true }, (socket) => {
     const unsubscribe = store.subscribe((state) => {
@@ -203,7 +214,14 @@ async function main(): Promise<void> {
       return reply.code(401).send({ error: 'Unauthorized' });
     }
 
-    return store.engageKillSwitch();
+    const body = request.body && typeof request.body === 'object' ? request.body as Record<string, unknown> : null;
+    const reason = body && typeof body.reason === 'string' && body.reason.trim().length > 0 ? body.reason.trim() : undefined;
+
+    try {
+      return await store.engageKillSwitch(reason);
+    } catch (error) {
+      return reply.code(409).send({ error: error instanceof Error ? error.message : 'Unable to engage the kill switch.' });
+    }
   });
 
   app.post('/api/control/kill-switch/release', async (request, reply) => {
@@ -211,7 +229,11 @@ async function main(): Promise<void> {
       return reply.code(401).send({ error: 'Unauthorized' });
     }
 
-    return store.releaseKillSwitch();
+    try {
+      return await store.releaseKillSwitch();
+    } catch (error) {
+      return reply.code(409).send({ error: error instanceof Error ? error.message : 'Unable to release the kill switch.' });
+    }
   });
 
   app.get('/', async (_request, reply) => reply.sendFile('index.html'));
@@ -228,7 +250,7 @@ async function main(): Promise<void> {
   }, config.marketRefreshMs).unref();
 
   await app.listen({ host: config.host, port: config.port });
-  app.log.info(`Phantom3 v2 listening on ${config.publicBaseUrl}`);
+  app.log.info(`Wraith listening on ${config.publicBaseUrl}`);
 }
 
 main().catch((error) => {

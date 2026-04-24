@@ -1,6 +1,6 @@
 # Paper execution package
 
-Conservative paper execution adapter for Phantom3 v2.
+Conservative paper execution adapter for Wraith.
 
 ## What landed
 

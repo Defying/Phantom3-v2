@@ -120,7 +120,13 @@ export class PaperExecutionAdapter {
     const events: PaperLedgerEvent[] = [intentEvent];
 
     const reservedSellQuantity = this.getReservedSellQuantity(projection, intent.marketId, intent.tokenId);
-    const position = projection.positions.get(positionKeyFor(intent.marketId, intent.tokenId));
+    const rawPosition = projection.positions.get(positionKeyFor(intent.marketId, intent.tokenId));
+    if (rawPosition && rawPosition.executionMode !== 'paper') {
+      throw new Error(
+        `Cannot route paper order ${intent.intentId} while ${rawPosition.executionMode} state owns ${rawPosition.positionId}.`
+      );
+    }
+    const position = rawPosition?.executionMode === 'paper' ? rawPosition : undefined;
     const availableToSell = Math.max(0, (position?.netQuantity ?? 0) - reservedSellQuantity);
 
     if (intent.side === 'sell' && availableToSell + LEDGER_EPSILON < intent.quantity) {
@@ -242,6 +248,7 @@ export class PaperExecutionAdapter {
 
     const projection = await this.ledger.readProjection();
     const openOrders = getOpenOrders(projection, {
+      executionMode: 'paper',
       marketId: quote.marketId,
       tokenId: quote.tokenId
     });
@@ -257,7 +264,9 @@ export class PaperExecutionAdapter {
 
     const events: PaperLedgerEvent[] = [];
     const filledOrderIds: string[] = [];
-    const positionState = new Map(projection.positions);
+    const positionState = new Map(
+      [...projection.positions.entries()].filter(([, position]) => position.executionMode === 'paper')
+    );
     let remainingAskLiquidity = this.normalizeLiquidity(quote.askSize);
     let remainingBidLiquidity = this.normalizeLiquidity(quote.bidSize);
 
@@ -487,6 +496,7 @@ export class PaperExecutionAdapter {
       orderId: order.orderId,
       intentId: order.intentId,
       sessionId: order.sessionId,
+      executionMode: 'paper',
       marketId: order.marketId,
       tokenId: order.tokenId,
       side: order.side,
@@ -515,7 +525,7 @@ export class PaperExecutionAdapter {
     marketId: string,
     tokenId: string
   ): number {
-    return getOpenOrders(projection, { marketId, tokenId })
+    return getOpenOrders(projection, { executionMode: 'paper', marketId, tokenId })
       .filter((order) => order.side === 'sell')
       .reduce((sum, order) => sum + order.remainingQuantity, 0);
   }

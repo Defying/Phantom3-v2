@@ -17,9 +17,24 @@ import type {
   WatchEntry
 } from '../../../packages/contracts/src/index.js';
 import { strategyStateSnapshotSchema } from '../../../packages/contracts/src/index.js';
-import { getOpenOrders, JsonlLedger, positionKeyFor, type ProjectedPosition } from '../../../packages/ledger/src/index.js';
+import {
+  getActiveOrders,
+  getOpenOrders,
+  JsonlLedger,
+  positionKeyFor,
+  type ApprovedTradeIntent,
+  type ProjectedOrder,
+  type ProjectedPosition
+} from '../../../packages/ledger/src/index.js';
+import {
+  LiveExecutionAdapter,
+  type LiveExchangeGateway,
+  type LiveExecutionResult,
+  type LiveStartupReconciliationResult,
+  type LiveVenueStateSnapshot
+} from '../../../packages/live-execution/src/index.js';
 import { fetchTopMarkets, type MarketSnapshot } from '../../../packages/market-data/src/index.js';
-import { PaperExecutionAdapter, type ApprovedTradeIntent } from '../../../packages/paper-execution/src/index.js';
+import { PaperExecutionAdapter } from '../../../packages/paper-execution/src/index.js';
 import { createPaperRiskConfig, evaluatePaperTradeRisk, type PaperRiskDecision } from '../../../packages/risk/src/index.js';
 import { buildStrategySignalReport, type PaperTradeIntent } from '../../../packages/strategy/src/index.js';
 import {
@@ -74,24 +89,58 @@ function inferOutcomeSide(market: RuntimeMarket, tokenId: string): 'yes' | 'no' 
   return 'yes';
 }
 
+type FlattenResult = { ok: true; submitted: number; reconciling: number; skipped: number; errors: string[] };
+
+export type RuntimeStoreOptions = {
+  liveExchange?: LiveExchangeGateway | null;
+  liveVenueSnapshot?: (() => Promise<LiveVenueStateSnapshot>) | null;
+  marketFetcher?: typeof fetchTopMarkets;
+};
+
+type PositionExecutionPath = 'paper' | 'live' | 'mixed' | 'unknown';
+
+type LiveProjectionState = {
+  activeOrderCount: number;
+  reconcileOrderCount: number;
+  openPositionCount: number;
+  mixedPositionCount: number;
+  blockingReason: string | null;
+};
+
 function buildLiveControlSummary(live: RuntimeLiveControl): string {
-  if (live.killSwitchActive) {
-    return `Kill switch is active${live.killSwitchReason ? ` (${live.killSwitchReason})` : ''}. New entries stay blocked until an operator releases it.`;
-  }
+  const killSwitchSummary = live.killSwitchActive
+    ? ` Kill switch is active${live.killSwitchReason ? ` (${live.killSwitchReason})` : ''}. New automated entries stay blocked until an operator clears it.`
+    : '';
 
-  if (!live.configured) {
-    return 'Paper-safe default. Live control plane is disabled for this process.';
+  switch (live.status) {
+    case 'paper-only':
+      return 'Paper-safe default. Live control plane is disabled for this process.';
+    case 'scaffold':
+      return `${live.blockingReason ?? 'Live control plane is configured, but the live adapter path is still scaffold-only.'} Flatten remains paper-only until a real live adapter is wired.${killSwitchSummary}`.trim();
+    case 'blocked-by-reconcile': {
+      const readinessSummary = live.liveAdapterReady
+        ? 'Live adapter path is present, but operator actions are blocked until reconciliation is clean.'
+        : 'Live control plane is configured, but operator actions remain blocked until startup reconciliation is clean.';
+      const flattenSummary = live.flattenPath === 'paper'
+        ? ' Paper flatten remains available for paper inventory while live controls stay blocked.'
+        : ' Flatten is blocked until live orders reconcile cleanly.';
+      return `${readinessSummary} ${live.blockingReason ?? 'Live state still needs reconciliation before arming or flattening.'}${flattenSummary}${killSwitchSummary}`.trim();
+    }
+    case 'adapter-ready': {
+      const armSummary = live.armed
+        ? 'Live adapter path is armed for operator controls.'
+        : live.canArm
+          ? 'Live adapter path is ready and can be armed for operator controls.'
+          : 'Live adapter path is present, but arming is currently blocked.';
+      const flattenSummary = live.flattenPath === 'live'
+        ? 'Reduce-only live flatten is available when reconciled venue inventory is present.'
+        : live.flattenPath === 'paper'
+          ? 'Flatten remains paper-only until live inventory appears.'
+          : 'Flatten is blocked until live orders reconcile cleanly.';
+      const blockingReason = live.blockingReason ? ` ${live.blockingReason}` : '';
+      return `${armSummary} ${flattenSummary} Automated strategy entries remain paper-only until live routing is implemented.${killSwitchSummary}${blockingReason}`.trim();
+    }
   }
-
-  if (!live.armable) {
-    return 'Live mode was requested in config, but process-level arming is disabled. No live adapter is installed, so venue writes stay blocked.';
-  }
-
-  if (live.armed) {
-    return 'Live control plane is armed at the operator layer, but no live adapter is installed yet, so venue writes remain blocked.';
-  }
-
-  return 'Live control plane is configured but disarmed. Paper execution remains authoritative until a live adapter exists.';
 }
 
 function createInitialLiveControl(config: AppConfig): RuntimeLiveControl {
@@ -99,10 +148,16 @@ function createInitialLiveControl(config: AppConfig): RuntimeLiveControl {
     configured: config.liveModeEnabled,
     armable: config.liveArmingEnabled,
     armed: false,
+    status: config.liveModeEnabled ? 'scaffold' : 'paper-only',
     liveAdapterReady: false,
+    canArm: false,
+    blockingReason: config.liveModeEnabled
+      ? 'Live control plane is configured, but the operator live adapter path is not installed yet.'
+      : null,
     killSwitchActive: false,
     killSwitchReason: null,
     flattenSupported: true,
+    flattenPath: 'paper',
     lastOperatorAction: null,
     lastOperatorActionAt: null,
     summary: ''
@@ -114,6 +169,9 @@ function createInitialLiveControl(config: AppConfig): RuntimeLiveControl {
 
 function executionModuleStatus(state: RuntimeState): RuntimeModule['status'] {
   if (state.execution.tradeStates.error > 0) {
+    return 'blocked';
+  }
+  if (state.execution.live.status === 'blocked-by-reconcile') {
     return 'blocked';
   }
   if (state.execution.live.killSwitchActive || state.execution.tradeStates.reconcile > 0 || state.execution.live.armed) {
@@ -179,13 +237,17 @@ function buildWatchlist(state: RuntimeState): WatchEntry[] {
       label: 'Paper mode only',
       status: 'active',
       note: state.execution.live.configured
-        ? `Paper execution is still authoritative while the live control plane is ${state.execution.live.armed ? 'armed' : 'disarmed'}.`
+        ? `Paper execution is still authoritative while the live control plane is ${state.execution.live.armed ? 'armed' : 'disarmed'} and ${state.execution.live.status}.`
         : 'Live trading remains disarmed by design.'
     },
     {
       id: 'live-control-plane',
       label: 'Live control plane',
-      status: state.execution.live.killSwitchActive ? 'disabled' : state.execution.live.configured ? 'active' : 'planned',
+      status: state.execution.live.status === 'paper-only'
+        ? 'planned'
+        : state.execution.live.status === 'blocked-by-reconcile' || state.execution.live.killSwitchActive
+          ? 'disabled'
+          : 'active',
       note: state.execution.live.summary
     },
     {
@@ -216,7 +278,7 @@ function createInitialState(config: AppConfig): RuntimeState {
   };
 
   const state = {
-    appName: 'Phantom3 v2',
+    appName: 'Wraith',
     version: '0.1.0',
     mode: 'paper',
     startedAt: now,
@@ -264,7 +326,7 @@ function createInitialState(config: AppConfig): RuntimeState {
     modules: [] as RuntimeModule[],
     watchlist: [] as WatchEntry[],
     events: [
-      event('info', 'Phantom3 v2 bootstrap initialized.'),
+      event('info', 'Wraith bootstrap initialized.'),
       event('info', `Remote dashboard ${config.remoteDashboardEnabled ? 'enabled' : 'disabled'} at ${config.publicBaseUrl}`),
       ...(config.liveModeEnabled
         ? [event('warning', 'Live control plane is configured, but no live adapter is installed. Paper execution remains authoritative.')]
@@ -286,18 +348,29 @@ export class RuntimeStore {
   private readonly statePath: string;
   private readonly ledger: JsonlLedger;
   private readonly paperExecution: PaperExecutionAdapter;
+  private readonly liveExecution: LiveExecutionAdapter | null;
+  private readonly liveVenueSnapshot: (() => Promise<LiveVenueStateSnapshot>) | null;
+  private readonly marketFetcher: typeof fetchTopMarkets;
   private state: RuntimeState;
   private strategySnapshots: StrategyStateSnapshot[] = [];
+  private startupReconciliationAttempted = false;
+  private startupReconciliationResult: LiveStartupReconciliationResult | null = null;
+  private startupReconciliationError: string | null = null;
   private persistTimer: NodeJS.Timeout | null = null;
   private listeners = new Set<RuntimeListener>();
   private marketRefreshInFlight: Promise<void> | null = null;
   private marketSyncState: 'never' | 'ok' | 'error' = 'never';
   private lastMarketError: string | null = null;
 
-  constructor(private readonly config: AppConfig) {
+  constructor(private readonly config: AppConfig, options: RuntimeStoreOptions = {}) {
     this.statePath = join(config.dataDir, 'runtime-state.json');
     this.ledger = new JsonlLedger({ directory: config.dataDir });
     this.paperExecution = new PaperExecutionAdapter(this.ledger);
+    this.liveVenueSnapshot = options.liveVenueSnapshot ?? null;
+    this.marketFetcher = options.marketFetcher ?? fetchTopMarkets;
+    this.liveExecution = config.liveModeEnabled && config.liveExecution.enabled && options.liveExchange
+      ? new LiveExecutionAdapter(this.ledger, options.liveExchange, config.liveExecution)
+      : null;
     this.state = createInitialState(config);
   }
 
@@ -313,10 +386,12 @@ export class RuntimeStore {
       this.state = this.hydrateState(existing);
       this.syncStrategyState('bootstrap', this.currentStrategyPayload(), { recordSnapshot: this.strategySnapshots.length === 0 });
       await this.refreshExecutionState();
+      await this.reconcileLiveStartupState('startup');
       this.pushEvent('info', 'Reloaded persisted bootstrap state.');
     } catch {
       this.syncStrategyState('bootstrap', this.currentStrategyPayload());
       await this.refreshExecutionState();
+      await this.reconcileLiveStartupState('startup');
       await this.persist();
     }
 
@@ -366,11 +441,8 @@ export class RuntimeStore {
     if (!live.configured) {
       throw new Error('Live mode is not enabled for this process.');
     }
-    if (!live.armable) {
-      throw new Error('Live mode was requested, but arming is disabled for this process.');
-    }
-    if (live.killSwitchActive) {
-      throw new Error('Cannot arm the live control plane while the kill switch is active.');
+    if (!live.canArm) {
+      throw new Error(live.blockingReason ?? 'Live adapter controls are not ready to arm yet.');
     }
     if (live.armed) {
       return { ok: true, armed: true, changed: false };
@@ -384,7 +456,7 @@ export class RuntimeStore {
       summary: ''
     });
     await this.refreshExecutionState();
-    this.pushEvent('warning', 'Operator armed the live control plane. No live adapter is installed, so venue writes remain blocked.');
+    this.pushEvent('info', 'Operator armed the live control plane for live adapter controls. Automated strategy entries remain paper-only.');
     return { ok: true, armed: true, changed: true };
   }
 
@@ -412,6 +484,16 @@ export class RuntimeStore {
       return { ok: true, active: true, changed: false };
     }
 
+    let projection: RuntimeProjection | undefined;
+    if (this.liveExecution) {
+      await this.liveExecution.engageKillSwitch({
+        sessionId: 'wraith-operator-control',
+        note: reason,
+        metadata: { source: 'control-api' }
+      });
+      projection = await this.ledger.readProjection();
+    }
+
     this.replaceLiveControl({
       ...live,
       armed: false,
@@ -421,7 +503,7 @@ export class RuntimeStore {
       lastOperatorActionAt: isoNow(),
       summary: ''
     });
-    await this.refreshExecutionState();
+    await this.refreshExecutionState(projection);
     this.pushEvent('warning', `Operator engaged the global kill switch${reason ? ` (${reason})` : ''}. New entries are now blocked.`);
     return { ok: true, active: true, changed: true };
   }
@@ -432,6 +514,26 @@ export class RuntimeStore {
       return { ok: true, active: false, changed: false };
     }
 
+    let projection: RuntimeProjection | undefined;
+    if (this.liveExecution) {
+      projection = await this.ledger.readProjection();
+      const startupBlockingReason = this.liveStartupBlockingReason();
+      if (startupBlockingReason) {
+        throw new Error(startupBlockingReason);
+      }
+      const liveProjection = this.describeLiveProjection(projection);
+      if (liveProjection.reconcileOrderCount > 0 || liveProjection.activeOrderCount > 0 || liveProjection.openPositionCount > 0 || liveProjection.mixedPositionCount > 0) {
+        throw new Error(liveProjection.blockingReason ?? 'Cannot release the kill switch while live state still needs reconciliation.');
+      }
+
+      await this.liveExecution.releaseKillSwitch({
+        sessionId: 'wraith-operator-control',
+        note: 'operator-cleared',
+        metadata: { source: 'control-api' }
+      });
+      projection = await this.ledger.readProjection();
+    }
+
     this.replaceLiveControl({
       ...live,
       killSwitchActive: false,
@@ -440,12 +542,12 @@ export class RuntimeStore {
       lastOperatorActionAt: isoNow(),
       summary: ''
     });
-    await this.refreshExecutionState();
+    await this.refreshExecutionState(projection);
     this.pushEvent('info', 'Operator released the global kill switch.');
     return { ok: true, active: false, changed: true };
   }
 
-  async flattenOpenPositions(): Promise<{ ok: true; submitted: number; reconciling: number; skipped: number; errors: string[] }> {
+  async flattenOpenPositions(): Promise<FlattenResult> {
     if (this.state.marketData.stale || !this.state.marketData.syncedAt) {
       throw new Error('Cannot flatten positions without a fresh market snapshot.');
     }
@@ -454,7 +556,7 @@ export class RuntimeStore {
     const openPositions = [...projection.positions.values()].filter((position) => position.status === 'open' && position.netQuantity > 0);
     if (openPositions.length === 0) {
       await this.refreshExecutionState(projection);
-      this.pushEvent('info', 'Operator requested flatten, but no open paper positions were available.');
+      this.pushEvent('info', 'Operator requested flatten, but no open positions were available.');
       return { ok: true, submitted: 0, reconciling: 0, skipped: 0, errors: [] };
     }
 
@@ -488,18 +590,19 @@ export class RuntimeStore {
         continue;
       }
 
-      const intent = this.createFlattenIntent(position, quote.bestBid, observedAt);
-      if (!intent) {
-        skipped += 1;
-        errors.push(`Cannot flatten ${position.positionId}: invalid quantity or price.`);
-        continue;
-      }
-
       try {
-        const result = await this.paperExecution.submitApprovedIntent({ intent, quote });
+        const executionPath = this.positionExecutionPath(projection, position);
+        if (executionPath === 'mixed' || executionPath === 'unknown') {
+          throw new Error(`Cannot flatten ${position.positionId}: execution provenance is ${executionPath}, so the runtime cannot prove which adapter should own the exit.`);
+        }
+
+        const result = executionPath === 'live'
+          ? await this.submitLiveFlatten(position, quote, projection)
+          : await this.submitPaperFlatten(position, quote, observedAt);
+
         projection = await this.ledger.readProjection();
         submitted += 1;
-        if (result.status === 'open' || result.status === 'partially-filled') {
+        if (result.status === 'open' || result.status === 'partially-filled' || result.status === 'reconcile') {
           reconciling += 1;
         }
       } catch (error) {
@@ -654,22 +757,84 @@ export class RuntimeStore {
 
   private async refreshExecutionState(projection?: RuntimeProjection): Promise<void> {
     const nextProjection = projection ?? await this.ledger.readProjection();
-    const live = {
-      ...this.state.execution.live,
-      summary: buildLiveControlSummary(this.state.execution.live)
-    } satisfies RuntimeLiveControl;
+    const live = this.buildLiveControlState(nextProjection);
 
     this.state.execution = createRuntimeExecutionSummary(this.state, nextProjection, live);
     this.state.modules = buildModules(this.state);
     this.state.watchlist = buildWatchlist(this.state);
   }
 
+  private async reconcileLiveStartupState(source: 'startup' | 'manual'): Promise<void> {
+    this.startupReconciliationAttempted = false;
+    this.startupReconciliationResult = null;
+    this.startupReconciliationError = null;
+
+    if (!this.state.execution.live.configured || !this.state.execution.live.armable) {
+      await this.refreshExecutionState();
+      return;
+    }
+    if (!this.config.liveExecution.enabled || !this.liveExecution || !this.liveVenueSnapshot) {
+      await this.refreshExecutionState();
+      return;
+    }
+
+    try {
+      const snapshot = await this.liveVenueSnapshot();
+      const result = await this.liveExecution.reconcileStartupState(snapshot);
+      this.startupReconciliationAttempted = true;
+      this.startupReconciliationResult = result;
+
+      let projection = await this.ledger.readProjection();
+      if (!result.clean) {
+        if (!projection.killSwitch.active) {
+          await this.liveExecution.engageKillSwitch({
+            sessionId: 'wraith-startup-recovery',
+            note: 'startup-reconcile-required',
+            metadata: {
+              source,
+              observedAt: result.observedAt,
+              reasons: result.reasons
+            }
+          });
+          projection = await this.ledger.readProjection();
+        }
+        await this.refreshExecutionState(projection);
+        this.pushEvent('warning', `Live startup reconciliation blocked arming: ${this.summarizeStartupReconciliation(result)}`);
+        return;
+      }
+
+      await this.refreshExecutionState(projection);
+      const exposureSummary = result.trackedLiveOrderIds.length > 0 || result.trackedLivePositionKeys.length > 0
+        ? ` (${result.trackedLiveOrderIds.length} tracked live order${result.trackedLiveOrderIds.length === 1 ? '' : 's'}, ${result.trackedLivePositionKeys.length} tracked live position${result.trackedLivePositionKeys.length === 1 ? '' : 's'})`
+        : '';
+      this.pushEvent('info', `Live startup reconciliation restored venue truth${exposureSummary}.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown startup reconciliation error';
+      this.startupReconciliationAttempted = true;
+      this.startupReconciliationError = `Startup venue reconciliation failed: ${message}`;
+
+      let projection = await this.ledger.readProjection();
+      if (!projection.killSwitch.active) {
+        await this.liveExecution.engageKillSwitch({
+          sessionId: 'wraith-startup-recovery',
+          note: 'startup-reconcile-failed',
+          metadata: {
+            source,
+            error: message
+          }
+        });
+        projection = await this.ledger.readProjection();
+      }
+
+      await this.refreshExecutionState(projection);
+      this.pushEvent('warning', this.startupReconciliationError);
+    }
+  }
+
   private replaceLiveControl(next: RuntimeLiveControl): void {
     const normalized = {
       ...next,
       armed: next.killSwitchActive ? false : next.armed,
-      liveAdapterReady: false,
-      flattenSupported: true,
       summary: ''
     } satisfies RuntimeLiveControl;
 
@@ -679,6 +844,212 @@ export class RuntimeStore {
       requestedMode: normalized.configured ? 'live' : 'paper',
       live: normalized
     };
+  }
+
+  private liveAdapterInstalled(): boolean {
+    return Boolean(this.liveExecution);
+  }
+
+  private liveRecoveryInstalled(): boolean {
+    return this.liveAdapterInstalled() && Boolean(this.liveVenueSnapshot);
+  }
+
+  private summarizeStartupReconciliation(result: LiveStartupReconciliationResult): string {
+    const [firstReason, ...rest] = result.reasons;
+    if (!firstReason) {
+      return 'Startup venue reconciliation still needs manual review.';
+    }
+    return rest.length > 0 ? `${firstReason} (+${rest.length} more)` : firstReason;
+  }
+
+  private liveStartupBlockingReason(): string | null {
+    if (!this.liveRecoveryInstalled()) {
+      return null;
+    }
+    if (!this.startupReconciliationAttempted) {
+      return 'Startup venue reconciliation has not completed yet.';
+    }
+    if (this.startupReconciliationError) {
+      return this.startupReconciliationError;
+    }
+    if (this.startupReconciliationResult && !this.startupReconciliationResult.clean) {
+      return this.summarizeStartupReconciliation(this.startupReconciliationResult);
+    }
+    return null;
+  }
+
+  private buildLiveControlState(projection: RuntimeProjection): RuntimeLiveControl {
+    const current = this.state.execution.live;
+    const liveProjection = this.describeLiveProjection(projection);
+    const latestOperatorAction = projection.operatorActions.at(-1) ?? null;
+    const killSwitchActive = this.liveExecution ? projection.killSwitch.active : current.killSwitchActive;
+    const killSwitchReason = this.liveExecution ? projection.killSwitch.reason : current.killSwitchReason;
+    const startupBlockingReason = this.liveStartupBlockingReason();
+    const liveAdapterInstalled = this.liveAdapterInstalled();
+
+    let status: RuntimeLiveControl['status'] = 'paper-only';
+    let blockingReason: string | null = null;
+    let canArm = false;
+    let flattenPath: RuntimeLiveControl['flattenPath'] = 'paper';
+
+    if (!current.configured) {
+      status = 'paper-only';
+    } else if (!current.armable) {
+      status = 'scaffold';
+      blockingReason = 'Live mode was requested in config, but process-level arming is disabled for this process.';
+    } else if (!this.config.liveExecution.enabled) {
+      status = 'scaffold';
+      blockingReason = 'Live control plane is configured, but venue-backed live execution is disabled for this process.';
+    } else if (!this.liveExecution) {
+      status = 'scaffold';
+      blockingReason = 'Live control plane is configured, but the operator live exchange gateway is not installed yet.';
+    } else if (!this.liveVenueSnapshot) {
+      status = 'scaffold';
+      blockingReason = 'Live control plane is configured, but the startup venue snapshot path is not installed yet.';
+    } else if (startupBlockingReason) {
+      status = 'blocked-by-reconcile';
+      blockingReason = startupBlockingReason;
+      flattenPath = liveProjection.openPositionCount > 0 || liveProjection.activeOrderCount > 0 || liveProjection.reconcileOrderCount > 0 || liveProjection.mixedPositionCount > 0
+        ? 'blocked'
+        : 'paper';
+    } else if (liveProjection.blockingReason) {
+      status = 'blocked-by-reconcile';
+      blockingReason = liveProjection.blockingReason;
+      flattenPath = liveProjection.openPositionCount > 0 || liveProjection.activeOrderCount > 0 || liveProjection.reconcileOrderCount > 0 || liveProjection.mixedPositionCount > 0
+        ? 'blocked'
+        : 'paper';
+    } else {
+      status = 'adapter-ready';
+      canArm = !killSwitchActive;
+      flattenPath = liveProjection.openPositionCount > 0 ? 'live' : 'paper';
+      if (killSwitchActive) {
+        blockingReason = `Kill switch is active${killSwitchReason ? `: ${killSwitchReason}` : '.'}`;
+      }
+    }
+
+    const live = {
+      ...current,
+      armed: current.armed && !killSwitchActive && canArm,
+      status,
+      liveAdapterReady: liveAdapterInstalled,
+      canArm,
+      blockingReason,
+      killSwitchActive,
+      killSwitchReason,
+      flattenSupported: flattenPath !== 'blocked',
+      flattenPath,
+      lastOperatorAction: latestOperatorAction?.action ?? current.lastOperatorAction,
+      lastOperatorActionAt: latestOperatorAction?.recordedAt ?? current.lastOperatorActionAt,
+      summary: ''
+    } satisfies RuntimeLiveControl;
+
+    live.summary = buildLiveControlSummary(live);
+    return live;
+  }
+
+  private describeLiveProjection(projection: RuntimeProjection): LiveProjectionState {
+    const activeLiveOrders = getActiveOrders(projection).filter((order) => this.orderExecutionPath(projection, order) === 'live');
+    const reconcileLiveOrders = [...projection.orders.values()].filter(
+      (order) => order.status === 'reconcile' && this.orderExecutionPath(projection, order) === 'live'
+    );
+    const livePositions = [...projection.positions.values()].filter(
+      (position) => position.status === 'open' && position.netQuantity > 0 && this.positionExecutionPath(projection, position) === 'live'
+    );
+    const mixedPositions = [...projection.positions.values()].filter(
+      (position) => position.status === 'open' && position.netQuantity > 0 && this.positionExecutionPath(projection, position) === 'mixed'
+    );
+
+    let blockingReason: string | null = null;
+    if (projection.anomalies.length > 0) {
+      blockingReason = projection.anomalies[0] ?? 'Ledger projection reported an anomaly that needs reconciliation.';
+    } else if (reconcileLiveOrders.length > 0) {
+      blockingReason = `${reconcileLiveOrders.length} live order${reconcileLiveOrders.length === 1 ? '' : 's'} still need reconciliation before arming or flattening.`;
+    } else if (activeLiveOrders.length > 0) {
+      blockingReason = `${activeLiveOrders.length} live order${activeLiveOrders.length === 1 ? '' : 's'} are still working. Flatten stays blocked until cancel/reconcile support is in place.`;
+    } else if (mixedPositions.length > 0) {
+      blockingReason = `${mixedPositions.length} open position${mixedPositions.length === 1 ? '' : 's'} mix paper and live fills, so operator exits stay fail-closed.`;
+    }
+
+    return {
+      activeOrderCount: activeLiveOrders.length,
+      reconcileOrderCount: reconcileLiveOrders.length,
+      openPositionCount: livePositions.length,
+      mixedPositionCount: mixedPositions.length,
+      blockingReason
+    };
+  }
+
+  private orderExecutionPath(projection: RuntimeProjection, order: ProjectedOrder): PositionExecutionPath {
+    const intent = projection.intents.get(order.intentId);
+    if (!intent) {
+      return 'unknown';
+    }
+    return intent.executionMode;
+  }
+
+  private positionExecutionPath(projection: RuntimeProjection, position: ProjectedPosition): PositionExecutionPath {
+    const fillModes = new Set<PositionExecutionPath>();
+    const fillMap = new Map(projection.fills.map((fill) => [fill.fillId, fill.executionMode] as const));
+
+    for (const lot of position.lots) {
+      const mode = fillMap.get(lot.sourceFillId);
+      if (mode === 'paper' || mode === 'live') {
+        fillModes.add(mode);
+      }
+    }
+
+    if (fillModes.size === 0) {
+      return 'unknown';
+    }
+    if (fillModes.size > 1) {
+      return 'mixed';
+    }
+    return [...fillModes][0] ?? 'unknown';
+  }
+
+  private async submitPaperFlatten(
+    position: ProjectedPosition,
+    quote: NonNullable<ReturnType<typeof createPaperQuote>>,
+    observedAt: string
+  ): Promise<{ status: string }> {
+    if (quote.bestBid == null) {
+      throw new Error(`Cannot flatten ${position.positionId}: best bid is unavailable.`);
+    }
+
+    const intent = this.createFlattenIntent(position, quote.bestBid, observedAt);
+    if (!intent) {
+      throw new Error(`Cannot flatten ${position.positionId}: invalid quantity or price.`);
+    }
+
+    return this.paperExecution.submitApprovedIntent({ intent, quote });
+  }
+
+  private async submitLiveFlatten(
+    position: ProjectedPosition,
+    quote: NonNullable<ReturnType<typeof createPaperQuote>>,
+    projection: RuntimeProjection
+  ): Promise<Pick<LiveExecutionResult, 'status'>> {
+    if (!this.liveExecution || !this.liveAdapterInstalled()) {
+      throw new Error(`Cannot flatten ${position.positionId}: the live adapter path is not installed for this process.`);
+    }
+
+    const startupBlockingReason = this.liveStartupBlockingReason();
+    if (startupBlockingReason) {
+      throw new Error(`Cannot flatten ${position.positionId}: ${startupBlockingReason}`);
+    }
+
+    const liveProjection = this.describeLiveProjection(projection);
+    if (liveProjection.blockingReason) {
+      throw new Error(`Cannot flatten ${position.positionId}: ${liveProjection.blockingReason}`);
+    }
+
+    return this.liveExecution.requestFlatten({
+      sessionId: 'wraith-operator-control',
+      marketId: position.marketId,
+      tokenId: position.tokenId,
+      quote,
+      note: 'Operator-requested reduce-only flatten.'
+    });
   }
 
   private marketMap(markets = this.state.markets): Map<string, RuntimeMarket> {
@@ -768,7 +1139,7 @@ export class RuntimeStore {
     }
 
     return {
-      sessionId: 'phantom3-v2-paper-runtime',
+      sessionId: 'wraith-paper-runtime',
       intentId: createRuntimeIntentId(input.intent),
       strategyId: input.intent.strategyId,
       marketId: input.intent.marketId,
@@ -798,7 +1169,7 @@ export class RuntimeStore {
     }
 
     return {
-      sessionId: 'phantom3-v2-operator-control',
+      sessionId: 'wraith-operator-control',
       intentId: `flatten-${position.positionId}-${observedAt.replace(/[:.]/g, '-')}`,
       strategyId: 'operator-flatten',
       marketId: position.marketId,
@@ -806,6 +1177,7 @@ export class RuntimeStore {
       side: 'sell',
       limitPrice: bestBid,
       quantity,
+      reduceOnly: true,
       approvedAt: observedAt,
       thesis: 'Operator-requested flatten.',
       confidence: null,
@@ -947,7 +1319,7 @@ export class RuntimeStore {
 
   private async doRefreshMarketData(): Promise<void> {
     try {
-      const snapshot = await fetchTopMarkets({
+      const snapshot = await this.marketFetcher({
         limit: this.config.marketLimit,
         timeoutMs: Math.min(Math.max(this.config.marketRefreshMs - 1000, 4000), 15000)
       });

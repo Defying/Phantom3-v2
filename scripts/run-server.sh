@@ -1,7 +1,7 @@
 #!/bin/zsh
 set -euo pipefail
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
-ROOT="/Volumes/Carve/Projects/Phantom3-v2"
+ROOT="/Volumes/Carve/Projects/wraith"
 cd "$ROOT"
 mkdir -p logs data
 print -r -- $$ > logs/server.pid

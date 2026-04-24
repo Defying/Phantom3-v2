@@ -98,6 +98,16 @@ export const liveVenueFillSchema = z.object({
 });
 export type LiveVenueFill = z.infer<typeof liveVenueFillSchema>;
 
+export const liveVenuePositionSnapshotSchema = z.object({
+  observedAt: z.string().min(1).optional(),
+  marketId: z.string().min(1),
+  tokenId: z.string().min(1),
+  quantity: z.number().nonnegative().finite(),
+  ambiguous: z.boolean().optional(),
+  raw: z.record(z.string(), z.unknown()).optional()
+});
+export type LiveVenuePositionSnapshot = z.infer<typeof liveVenuePositionSnapshotSchema>;
+
 export const liveSubmitResultSchema = z.object({
   transportStatus: z.enum(['acknowledged', 'rejected', 'ambiguous']).default('acknowledged'),
   order: liveVenueOrderSnapshotSchema.optional(),
@@ -113,7 +123,8 @@ const liveVenueSnapshotOrderInputSchema = liveVenueOrderSnapshotBaseSchema.exten
 export const liveVenueStateSnapshotSchema = z.object({
   observedAt: z.string().min(1),
   orders: z.array(liveVenueSnapshotOrderInputSchema),
-  fills: z.array(liveVenueFillSchema).default([])
+  fills: z.array(liveVenueFillSchema).default([]),
+  positions: z.array(liveVenuePositionSnapshotSchema).default([])
 });
 export type LiveVenueStateSnapshot = z.infer<typeof liveVenueStateSnapshotSchema>;
 
@@ -144,7 +155,17 @@ export type LiveReconciliationResult = {
   filledOrderIds: string[];
   reconcileRequiredOrderIds: string[];
   unmatchedVenueOrderIds: string[];
+  unmatchedVenueFillIds: string[];
   skippedReason?: string;
+};
+
+export type LiveStartupReconciliationResult = LiveReconciliationResult & {
+  clean: boolean;
+  reasons: string[];
+  trackedLiveOrderIds: string[];
+  trackedLivePositionKeys: string[];
+  positionMismatchKeys: string[];
+  unmatchedVenuePositionKeys: string[];
 };
 
 const DEFAULTS = liveExecutionConfigSchema.parse({});
@@ -292,6 +313,7 @@ export class LiveExecutionAdapter {
         filledOrderIds: [],
         reconcileRequiredOrderIds: [],
         unmatchedVenueOrderIds: [],
+        unmatchedVenueFillIds: [],
         skippedReason: `Venue snapshot ${snapshot.observedAt} is older than ${this.maxReconcileAgeMs}ms.`
       };
     }
@@ -302,12 +324,13 @@ export class LiveExecutionAdapter {
     }));
     const fills = snapshot.fills.map((fill) => liveVenueFillSchema.parse(fill));
     const projection = await this.ledger.readProjection();
-    const activeOrders = getActiveOrders(projection);
+    const activeOrders = getActiveOrders(projection, { executionMode: 'live' });
     const envelopes: LedgerEnvelope[] = [];
     const reconciledOrderIds: string[] = [];
     const filledOrderIds: string[] = [];
     const reconcileRequiredOrderIds: string[] = [];
     const matchedOrderKeys = new Set<string>();
+    const matchedVenueFillIds = new Set<string>();
 
     for (const activeOrder of activeOrders) {
       const matches = orders.filter((candidate) => this.matchesTrackedOrder(activeOrder, candidate));
@@ -341,6 +364,9 @@ export class LiveExecutionAdapter {
       const matchedOrder = matches[0]!;
       matchedOrderKeys.add(this.snapshotOrderKey(matchedOrder));
       const matchedFills = fills.filter((fill) => this.matchesTrackedFill(activeOrder, matchedOrder, fill));
+      for (const fill of matchedFills) {
+        matchedVenueFillIds.add(fill.venueFillId);
+      }
       const result = await this.reconcileTrackedOrder({
         orderId: activeOrder.orderId,
         venueOrder: matchedOrder,
@@ -360,6 +386,9 @@ export class LiveExecutionAdapter {
     const unmatchedVenueOrderIds = orders
       .filter((order) => !matchedOrderKeys.has(this.snapshotOrderKey(order)))
       .map((order) => order.venueOrderId ?? order.clientOrderId ?? '(unknown-order)');
+    const unmatchedVenueFillIds = fills
+      .filter((fill) => !matchedVenueFillIds.has(fill.venueFillId))
+      .map((fill) => fill.venueFillId);
 
     return {
       observedAt: snapshot.observedAt,
@@ -367,7 +396,101 @@ export class LiveExecutionAdapter {
       reconciledOrderIds,
       filledOrderIds,
       reconcileRequiredOrderIds,
-      unmatchedVenueOrderIds
+      unmatchedVenueOrderIds,
+      unmatchedVenueFillIds
+    };
+  }
+
+  async reconcileStartupState(input: LiveVenueStateSnapshot): Promise<LiveStartupReconciliationResult> {
+    const snapshot = liveVenueStateSnapshotSchema.parse(input);
+    const positions = snapshot.positions.map((position) => liveVenuePositionSnapshotSchema.parse({
+      ...position,
+      observedAt: position.observedAt ?? snapshot.observedAt
+    }));
+    const startupReasons = new Set<string>();
+    const venuePositions = new Map<string, LiveVenuePositionSnapshot>();
+
+    for (const position of positions) {
+      const key = positionKeyFor(position.marketId, position.tokenId);
+      const observedAt = position.observedAt ?? snapshot.observedAt;
+
+      if (venuePositions.has(key)) {
+        startupReasons.add(`Venue position snapshot contains multiple entries for ${key}.`);
+        continue;
+      }
+      if (!this.isTimestampFresh(observedAt, this.maxReconcileAgeMs)) {
+        startupReasons.add(`Venue position snapshot for ${key} is older than ${this.maxReconcileAgeMs}ms.`);
+      }
+      if (position.ambiguous && this.failClosedOnAmbiguousState) {
+        startupReasons.add(`Venue position ${key} was flagged ambiguous by the exchange adapter.`);
+      }
+      venuePositions.set(key, position);
+    }
+
+    const reconciliation = await this.reconcileVenueSnapshot(snapshot);
+    if (reconciliation.skippedReason) {
+      startupReasons.add(reconciliation.skippedReason);
+    }
+    if (reconciliation.reconcileRequiredOrderIds.length > 0) {
+      startupReasons.add(`Live order reconciliation is still required for ${reconciliation.reconcileRequiredOrderIds.join(', ')}.`);
+    }
+    if (reconciliation.unmatchedVenueOrderIds.length > 0) {
+      startupReasons.add(`Venue snapshot exposed unmatched live orders: ${reconciliation.unmatchedVenueOrderIds.join(', ')}.`);
+    }
+    if (reconciliation.unmatchedVenueFillIds.length > 0) {
+      startupReasons.add(`Venue snapshot exposed unmatched live fills: ${reconciliation.unmatchedVenueFillIds.join(', ')}.`);
+    }
+
+    const projection = await this.ledger.readProjection();
+    const trackedLiveOrders = getActiveOrders(projection, { executionMode: 'live' });
+    if (projection.anomalies.length > 0) {
+      for (const anomaly of projection.anomalies) {
+        startupReasons.add(anomaly);
+      }
+    }
+    const trackedLivePositions = [...projection.positions.values()]
+      .filter((position) => position.executionMode === 'live' && position.netQuantity > LEDGER_EPSILON);
+    const positionMismatchKeys: string[] = [];
+    const unmatchedVenuePositionKeys: string[] = [];
+    const matchedPositionKeys = new Set<string>();
+
+    for (const position of trackedLivePositions) {
+      const key = position.positionId;
+      const venuePosition = venuePositions.get(key);
+      if (!venuePosition) {
+        positionMismatchKeys.push(key);
+        startupReasons.add(`Tracked live position ${key} is missing from the venue position snapshot.`);
+        continue;
+      }
+
+      matchedPositionKeys.add(key);
+      if (Math.abs(position.netQuantity - venuePosition.quantity) > LEDGER_EPSILON) {
+        positionMismatchKeys.push(key);
+        startupReasons.add(
+          `Venue position ${key} reports ${venuePosition.quantity}, but the ledger projects ${position.netQuantity}.`
+        );
+      }
+    }
+
+    for (const [key, venuePosition] of venuePositions.entries()) {
+      if (matchedPositionKeys.has(key)) {
+        continue;
+      }
+      if (venuePosition.quantity <= LEDGER_EPSILON) {
+        continue;
+      }
+      unmatchedVenuePositionKeys.push(key);
+      startupReasons.add(`Venue position ${key} still holds ${venuePosition.quantity}, but the ledger is flat.`);
+    }
+
+    return {
+      ...reconciliation,
+      clean: startupReasons.size === 0,
+      reasons: [...startupReasons],
+      trackedLiveOrderIds: trackedLiveOrders.map((order) => order.orderId),
+      trackedLivePositionKeys: trackedLivePositions.map((position) => position.positionId),
+      positionMismatchKeys,
+      unmatchedVenuePositionKeys
     };
   }
 
@@ -414,7 +537,15 @@ export class LiveExecutionAdapter {
 
     const quote = paperQuoteSchema.parse(input.quote);
     const projection = await this.ledger.readProjection();
-    const position = projection.positions.get(positionKeyFor(input.marketId, input.tokenId));
+    const workingBuyOrders = getActiveOrders(projection, { executionMode: 'live', marketId: input.marketId, tokenId: input.tokenId })
+      .filter((order) => order.side === 'buy');
+    if (workingBuyOrders.length > 0) {
+      throw new Error(
+        `Cannot flatten while ${workingBuyOrders.length} working buy order${workingBuyOrders.length === 1 ? ' still needs' : 's still need'} reconciliation for ${input.marketId}/${input.tokenId}. Cancel or reconcile entry orders first.`
+      );
+    }
+
+    const position = this.projectedLivePosition(projection, input.marketId, input.tokenId);
     const reservedSellQuantity = this.getReservedSellQuantity(projection, input.marketId, input.tokenId);
     const quantity = Math.max(0, (position?.netQuantity ?? 0) - reservedSellQuantity);
 
@@ -642,7 +773,7 @@ export class LiveExecutionAdapter {
     const fillEvents: FillRecordedEvent[] = [];
     const positionEvents: PositionUpdatedEvent[] = [];
     const ledgerEvents: PaperLedgerEvent[] = [];
-    let currentPosition = projection.positions.get(positionKeyFor(localOrder.marketId, localOrder.tokenId));
+    let currentPosition = this.projectedLivePosition(projection, localOrder.marketId, localOrder.tokenId);
 
     for (const fill of newVenueFills) {
       const fillEvent = this.buildLiveFillEvent({
@@ -758,7 +889,7 @@ export class LiveExecutionAdapter {
     }
 
     const reservedSellQuantity = this.getReservedSellQuantity(projection, intent.marketId, intent.tokenId);
-    const position = projection.positions.get(positionKeyFor(intent.marketId, intent.tokenId));
+    const position = this.projectedLivePosition(projection, intent.marketId, intent.tokenId);
     const availableToSell = Math.max(0, (position?.netQuantity ?? 0) - reservedSellQuantity);
 
     if (availableToSell + LEDGER_EPSILON < intent.quantity) {
@@ -773,7 +904,7 @@ export class LiveExecutionAdapter {
     marketId: string,
     tokenId: string
   ): number {
-    return getActiveOrders(projection, { marketId, tokenId })
+    return getActiveOrders(projection, { executionMode: 'live', marketId, tokenId })
       .filter((order) => order.side === 'sell')
       .reduce((sum, order) => sum + order.remainingQuantity, 0);
   }
@@ -1015,6 +1146,15 @@ export class LiveExecutionAdapter {
       return fill.clientOrderId === order.orderId;
     }
     return false;
+  }
+
+  private projectedLivePosition(
+    projection: Awaited<ReturnType<JsonlLedger['readProjection']>>,
+    marketId: string,
+    tokenId: string
+  ) {
+    const position = projection.positions.get(positionKeyFor(marketId, tokenId));
+    return position?.executionMode === 'live' ? position : undefined;
   }
 
   private shouldAllowMissingOrder(order: ProjectedOrder, observedAt: string): boolean {

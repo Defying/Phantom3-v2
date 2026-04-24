@@ -61,7 +61,7 @@ await expectIncludes('README.md', 'docs/runbooks/PAPER_SAFE_OPERATOR_RUNBOOK.md'
 
 await expectMatch(
   'packages/config/src/index.ts',
-  /PHANTOM3_V2_CONTROL_TOKEN:\s*z\.string\(\)\.min\(16/,
+  /WRAITH_CONTROL_TOKEN:\s*z\.string\(\)\.min\(16/,
   'control token minimum length is enforced'
 );
 await expectIncludes('packages/contracts/src/index.ts', "runtimeModeSchema = z.enum(['paper', 'live-disarmed'])", 'runtime contract remains paper/live-disarmed only');

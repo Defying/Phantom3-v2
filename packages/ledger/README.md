@@ -1,6 +1,6 @@
 # Ledger package
 
-Durable append-only paper ledger for Phantom3 v2.
+Durable append-only paper ledger for Wraith.
 
 ## What landed
 

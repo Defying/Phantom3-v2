@@ -22,7 +22,7 @@ function clock(): Date {
 }
 
 async function createHarness() {
-  const directory = await mkdtemp(join(tmpdir(), 'phantom3-live-safety-'));
+  const directory = await mkdtemp(join(tmpdir(), 'wraith-live-safety-'));
   cleanupDirs.push(directory);
 
   const ledger = new JsonlLedger({ directory, clock });
@@ -177,7 +177,7 @@ test('working sell orders reserve inventory and partial fills keep the remaining
 });
 
 test('restart replay rebuilds open positions and working exits before reconciliation resumes', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'phantom3-live-safety-restart-'));
+  const directory = await mkdtemp(join(tmpdir(), 'wraith-live-safety-restart-'));
   cleanupDirs.push(directory);
 
   const ledgerBeforeRestart = new JsonlLedger({ directory, clock });

@@ -68,23 +68,11 @@ function summarizeExecution(state: ExecutionStateBasis, live: RuntimeLiveControl
     ? 'No ledger-backed trades have been recorded yet.'
     : `${counts.pending} pending, ${counts.reconcile} reconcile, ${counts.open} open, ${counts.closed} closed, ${counts.error} error.`;
 
-  const modeSummary = live.configured
-    ? live.armed
-      ? 'Live control plane is armed, but the live adapter is still unavailable, so venue writes stay blocked.'
-      : live.armable
-        ? 'Live control plane is configured but disarmed. Paper execution remains the only writer.'
-        : 'Live mode was requested, but process-level arming is disabled. Paper execution remains the only writer.'
-    : 'Paper execution remains the only writer.';
-
-  const killSwitchSummary = live.killSwitchActive
-    ? ` Global kill switch is active${live.killSwitchReason ? ` (${live.killSwitchReason})` : ''}.`
-    : '';
-
   const staleSummary = state.marketData.stale && (counts.pending > 0 || counts.reconcile > 0)
     ? ' Fresh quotes are required before pending or reconciling trades can advance.'
     : '';
 
-  return `${modeSummary} ${tradeSummary}${killSwitchSummary}${staleSummary}`.trim();
+  return `${live.summary} ${tradeSummary}${staleSummary}`.trim();
 }
 
 function collectTradeGroups(projection: LedgerProjection): TradeGroup[] {

@@ -1,6 +1,6 @@
-# Phantom3 v2
+# Wraith
 
-Phantom3 v2 is the controlled rebuild of the original Phantom3 bot.
+Wraith is the controlled rebuild of the original Phantom3 bot.
 
 This repo is the **v2 bootstrap**: a TypeScript modular-monolith skeleton with a phone-friendly dashboard, strict safety defaults, and a bounded control API.
 
@@ -50,8 +50,8 @@ A local Compose example lives at `docker-compose.example.yml`.
 
 ```bash
 cp .env.example .env
-# set a real PHANTOM3_V2_CONTROL_TOKEN
-# set PHANTOM3_V2_PUBLIC_BASE_URL to your actual local/LAN URL
+# set a real WRAITH_CONTROL_TOKEN
+# set WRAITH_PUBLIC_BASE_URL to your actual local/LAN URL
 
 docker compose -f docker-compose.example.yml up -d
 ```
@@ -68,18 +68,20 @@ Notes:
 - QA checklist: `docs/qa/PAPER_SAFE_STRATEGY_CHECKLIST.md`
 - operator runbook and warnings: `docs/runbooks/PAPER_SAFE_OPERATOR_RUNBOOK.md`
 - future live thin-slice review checklist: `docs/qa/LIVE_THIN_SLICE_REVIEW_CHECKLIST.md`
+- live thin-slice no-go runbook: `docs/runbooks/LIVE_THIN_SLICE_OPERATOR_RUNBOOK.md`
 
 ## Important safety notes
 
 - this milestone is observer-first and paper-only
 - dashboard runtime updates stream over WebSocket at `/api/ws`
 - market discovery is read-only and refreshes from Polymarket Gamma + CLOB on a timed cadence
-- control endpoints require `X-Phantom3-Token` or `Authorization: Bearer <token>`
-- change `PHANTOM3_V2_CONTROL_TOKEN` before any shared use
+- control endpoints require `X-Wraith-Token` or `Authorization: Bearer <token>`
+- change `WRAITH_CONTROL_TOKEN` before any shared use
 - do **not** expose this app to the public internet, keep it on localhost, LAN, or a trusted private tunnel
 - live mode is not implemented in this bootstrap
-- before any live thin-slice PR is treated as ready for review, run `npm run verify:live-safety`
+- before any live thin-slice PR is treated as ready for review, run `npm run verify:live-safety` and read `docs/runbooks/LIVE_THIN_SLICE_OPERATOR_RUNBOOK.md`
 - a passing `npm run verify:paper-safe` only confirms static guardrails and docs markers, not trading safety or readiness
+- a passing `npm run verify:live-safety` is still a guardrail check, not proof of live-capital readiness
 
 ## Repo layout
 

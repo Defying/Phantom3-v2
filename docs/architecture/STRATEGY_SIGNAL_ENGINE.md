@@ -75,7 +75,7 @@ Rejected candidates still keep diagnostics and reject reasons so later modules o
 
 ## Why this shape is useful
 
-This gives Phantom3 v2 a strategy-core module that is:
+This gives Wraith a strategy-core module that is:
 - deterministic from the current snapshot input
 - explainable enough for replay and audits
 - safe to run in paper mode today

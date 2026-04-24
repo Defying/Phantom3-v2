@@ -2,7 +2,7 @@ import type { RuntimeMarket } from '../../contracts/src/index.js';
 
 const GAMMA_API_BASE = 'https://gamma-api.polymarket.com';
 const CLOB_API_BASE = 'https://clob.polymarket.com';
-const USER_AGENT = 'Phantom3-v2/0.1';
+const USER_AGENT = 'Wraith/0.1';
 
 type GammaEvent = {
   id: string | number;

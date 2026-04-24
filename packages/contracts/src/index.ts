@@ -158,14 +158,24 @@ export const runtimeTradeSummarySchema = z.object({
 });
 export type RuntimeTradeSummary = z.infer<typeof runtimeTradeSummarySchema>;
 
+export const runtimeLiveControlStatusSchema = z.enum(['paper-only', 'scaffold', 'adapter-ready', 'blocked-by-reconcile']);
+export type RuntimeLiveControlStatus = z.infer<typeof runtimeLiveControlStatusSchema>;
+
+export const runtimeFlattenPathSchema = z.enum(['paper', 'live', 'blocked']);
+export type RuntimeFlattenPath = z.infer<typeof runtimeFlattenPathSchema>;
+
 export const runtimeLiveControlSchema = z.object({
   configured: z.boolean(),
   armable: z.boolean(),
   armed: z.boolean(),
+  status: runtimeLiveControlStatusSchema,
   liveAdapterReady: z.boolean(),
+  canArm: z.boolean(),
+  blockingReason: z.string().nullable(),
   killSwitchActive: z.boolean(),
   killSwitchReason: z.string().nullable(),
   flattenSupported: z.boolean(),
+  flattenPath: runtimeFlattenPathSchema,
   lastOperatorAction: z.string().nullable(),
   lastOperatorActionAt: z.string().nullable(),
   summary: z.string()
@@ -229,7 +239,7 @@ export const paperStrategyViewSchema = z.object({
 export type PaperStrategyView = z.infer<typeof paperStrategyViewSchema>;
 
 export const runtimeStateSchema = z.object({
-  appName: z.literal('Phantom3 v2'),
+  appName: z.literal('Wraith'),
   version: z.string(),
   mode: runtimeModeSchema,
   startedAt: z.string(),

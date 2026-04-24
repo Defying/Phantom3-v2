@@ -1,6 +1,6 @@
-# `@phantom3-v2/risk`
+# `@wraith/risk`
 
-Pure paper-trading risk evaluation for Phantom3 v2.
+Pure paper-trading risk evaluation for Wraith.
 
 ## What it does
 

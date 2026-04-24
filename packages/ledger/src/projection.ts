@@ -22,6 +22,7 @@ export type PositionLot = {
 
 export type ProjectedPosition = {
   positionId: string;
+  executionMode: FillRecordedEvent['executionMode'];
   marketId: string;
   tokenId: string;
   openedAt: string | null;
@@ -37,6 +38,7 @@ export type ProjectedOrder = {
   orderId: string;
   intentId: string;
   sessionId: string;
+  executionMode: OrderUpdatedEvent['executionMode'];
   marketId: string;
   tokenId: string;
   side: OrderUpdatedEvent['side'];
@@ -95,9 +97,15 @@ function cloneLots(lots: readonly PositionLot[]): PositionLot[] {
   return lots.map((lot) => ({ ...lot }));
 }
 
-function emptyPosition(positionId: string, marketId: string, tokenId: string): ProjectedPosition {
+function emptyPosition(
+  positionId: string,
+  executionMode: FillRecordedEvent['executionMode'],
+  marketId: string,
+  tokenId: string
+): ProjectedPosition {
   return {
     positionId,
+    executionMode,
     marketId,
     tokenId,
     openedAt: null,
@@ -134,7 +142,13 @@ export function applyFillToPosition(current: ProjectedPosition | undefined, fill
   const positionId = positionKeyFor(fill.marketId, fill.tokenId);
   const base = current
     ? { ...current, lots: cloneLots(current.lots) }
-    : emptyPosition(positionId, fill.marketId, fill.tokenId);
+    : emptyPosition(positionId, fill.executionMode, fill.marketId, fill.tokenId);
+
+  if (current && current.executionMode !== fill.executionMode) {
+    throw new Error(
+      `Cannot apply ${fill.executionMode} fill ${fill.fillId} to ${current.executionMode} position ${positionId}.`
+    );
+  }
 
   if (fill.side === 'buy') {
     const unitCost = (fill.notional + fill.fee) / fill.quantity;
@@ -161,6 +175,7 @@ export function applyFillToPosition(current: ProjectedPosition | undefined, fill
       closedLotIds: [],
       position: {
         positionId,
+        executionMode: fill.executionMode,
         marketId: fill.marketId,
         tokenId: fill.tokenId,
         openedAt: base.netQuantity > 0 ? base.openedAt : fill.recordedAt,
@@ -224,6 +239,7 @@ export function applyFillToPosition(current: ProjectedPosition | undefined, fill
     closedLotIds,
     position: {
       positionId,
+      executionMode: fill.executionMode,
       marketId: fill.marketId,
       tokenId: fill.tokenId,
       openedAt: netQuantity > 0 ? base.openedAt : null,
@@ -241,10 +257,16 @@ export function isActiveOrderStatus(status: OrderUpdatedEvent['status']): boolea
   return ['pending-submit', 'pending-ack', 'open', 'partially-filled', 'cancel-pending', 'reconcile'].includes(status);
 }
 
-export function getActiveOrders(projection: LedgerProjection, filter?: { marketId?: string; tokenId?: string }): ProjectedOrder[] {
+export function getActiveOrders(
+  projection: LedgerProjection,
+  filter?: { executionMode?: OrderUpdatedEvent['executionMode']; marketId?: string; tokenId?: string }
+): ProjectedOrder[] {
   return [...projection.orders.values()]
     .filter((order) => {
       if (!isActiveOrderStatus(order.status)) {
+        return false;
+      }
+      if (filter?.executionMode && order.executionMode !== filter.executionMode) {
         return false;
       }
       if (filter?.marketId && order.marketId !== filter.marketId) {
@@ -258,7 +280,10 @@ export function getActiveOrders(projection: LedgerProjection, filter?: { marketI
     .sort((left, right) => left.submittedAt.localeCompare(right.submittedAt));
 }
 
-export function getOpenOrders(projection: LedgerProjection, filter?: { marketId?: string; tokenId?: string }): ProjectedOrder[] {
+export function getOpenOrders(
+  projection: LedgerProjection,
+  filter?: { executionMode?: OrderUpdatedEvent['executionMode']; marketId?: string; tokenId?: string }
+): ProjectedOrder[] {
   return getActiveOrders(projection, filter).filter((order) => order.status === 'open' || order.status === 'partially-filled');
 }
 
@@ -292,6 +317,7 @@ export function projectLedgerState(envelopes: readonly LedgerEnvelope[]): Ledger
           orderId: event.orderId,
           intentId: event.intentId,
           sessionId: event.sessionId,
+          executionMode: event.executionMode,
           marketId: event.marketId,
           tokenId: event.tokenId,
           side: event.side,
@@ -332,7 +358,7 @@ export function projectLedgerState(envelopes: readonly LedgerEnvelope[]): Ledger
       }
       case 'operator.action': {
         operatorActions.push(event);
-        if (event.action === 'kill-switch-engaged') {
+        if (event.executionMode === 'live' && event.action === 'kill-switch-engaged') {
           killSwitch = {
             active: true,
             triggeredAt: event.recordedAt,
@@ -340,7 +366,7 @@ export function projectLedgerState(envelopes: readonly LedgerEnvelope[]): Ledger
             reason: event.note ?? null
           };
         }
-        if (event.action === 'kill-switch-released') {
+        if (event.executionMode === 'live' && event.action === 'kill-switch-released') {
           killSwitch = {
             active: false,
             triggeredAt: killSwitch.triggeredAt,

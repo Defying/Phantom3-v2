@@ -28,10 +28,10 @@ Read these as hard warnings, not suggestions:
 
 Before starting a session:
 
-- set a fresh `PHANTOM3_V2_CONTROL_TOKEN`
-- verify `PHANTOM3_V2_PUBLIC_BASE_URL` matches the actual access path
-- confirm `PHANTOM3_V2_DATA_DIR` and `PHANTOM3_V2_LOG_DIR` point to writable local storage
-- prefer `PHANTOM3_V2_REMOTE_DASHBOARD=false` unless remote access is truly needed
+- set a fresh `WRAITH_CONTROL_TOKEN`
+- verify `WRAITH_PUBLIC_BASE_URL` matches the actual access path
+- confirm `WRAITH_DATA_DIR` and `WRAITH_LOG_DIR` point to writable local storage
+- prefer `WRAITH_REMOTE_DASHBOARD=false` unless remote access is truly needed
 - review `docs/milestones/PAPER_SAFE_STRATEGY_MILESTONE.md`
 - print or open `docs/qa/PAPER_SAFE_STRATEGY_CHECKLIST.md`
 

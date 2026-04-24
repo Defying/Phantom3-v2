@@ -3,7 +3,7 @@
 Status: planned, not implemented
 Date: 2026-04-21
 
-This spec defines the **smallest safe live-trading slice** for Phantom3 v2.
+This spec defines the **smallest safe live-trading slice** for Wraith.
 It is intentionally narrow so we do not recreate the old v1 failure modes:
 
 - false exits

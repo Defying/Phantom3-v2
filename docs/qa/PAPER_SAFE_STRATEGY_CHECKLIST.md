@@ -17,8 +17,8 @@ Date: `__________________`
 ## 2) Startup smoke test
 
 - [ ] `cp .env.example .env`
-- [ ] set a fresh `PHANTOM3_V2_CONTROL_TOKEN`
-- [ ] confirm `PHANTOM3_V2_PUBLIC_BASE_URL` matches the operator access path
+- [ ] set a fresh `WRAITH_CONTROL_TOKEN`
+- [ ] confirm `WRAITH_PUBLIC_BASE_URL` matches the operator access path
 - [ ] start the app with `npm run start`
 - [ ] `GET /api/health` returns `ok: true`
 - [ ] `GET /api/runtime` reports `mode: "paper"`
@@ -40,7 +40,7 @@ curl -s http://127.0.0.1:4317/api/health
 curl -s http://127.0.0.1:4317/api/runtime
 curl -i -X POST http://127.0.0.1:4317/api/control/pause
 curl -i -X POST \
-  -H "X-Phantom3-Token: $PHANTOM3_V2_CONTROL_TOKEN" \
+  -H "X-Wraith-Token: $WRAITH_CONTROL_TOKEN" \
   http://127.0.0.1:4317/api/control/pause
 ```
 
