@@ -33,9 +33,11 @@ The scanner emits a capped Kelly fraction. For paper/live experiments, treat thi
 
 1. Run `npm run scan:updown` for the full ranked board.
 2. Run `npm run watch:updown` on an interval for candidate-only alerts.
-3. Paper trade only `CANDIDATE` rows.
-4. Record fill price, market close result, modeled probability, edge, and blocker state.
-5. Promote to live only after enough paper samples show positive realized EV after spread/slippage.
+3. Run `npm run observe:updown` on an interval to append scan snapshots to `data/updown-observations.jsonl`.
+4. Run `npm run evaluate:updown` after markets resolve to score candidate hit rate and unit P&L against the Coinbase proxy.
+5. Paper trade only `CANDIDATE` rows.
+6. Record fill price, market close result, modeled probability, edge, and blocker state.
+7. Promote to live only after enough paper samples show positive realized EV after spread/slippage.
 
 ## No-go rules
 
