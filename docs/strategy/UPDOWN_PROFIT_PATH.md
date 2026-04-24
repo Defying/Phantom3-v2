@@ -45,3 +45,22 @@ The scanner emits a capped Kelly fraction. For paper/live experiments, treat thi
 - No live trades while source/proxy mismatch is unresolved.
 - No live trades if Wraith cannot prove durable ledger/reconciliation for the venue path.
 - No martingale, no doubling down, no “make it back” trades.
+
+
+## Zero-dollar simulation mode
+
+When there is no USDC to trade, Wraith should keep learning without touching the wallet.
+
+- `npm run observe:updown` records every scanner row to `data/updown-observations.jsonl`.
+- `npm run simulate:updown` replays resolved observations across threshold sweeps and reports hit rate, unit P&L, implied ROI, drawdown, and example trades.
+- By default the simulator dedupes by market+side so repeated scans do not pretend we could enter the same event over and over. Set `WRAITH_UPDOWN_SIM_DEDUPE=observation` only for research.
+- `npm run evaluate:updown` remains the strict candidate-only evaluator.
+
+Useful sweep knobs:
+
+- `WRAITH_UPDOWN_SIM_MIN_BUFFER_BPS=0,5,8,12,18`
+- `WRAITH_UPDOWN_SIM_MIN_MODEL_PROBABILITY=0.5,0.55,0.57,0.6,0.65`
+- `WRAITH_UPDOWN_SIM_MIN_EDGE=0,0.01,0.02,0.03,0.05`
+- `WRAITH_UPDOWN_SIM_MIN_TRADES=20` once enough observations exist
+
+A threshold set is not interesting until it has enough resolved samples and stays positive after spread/slippage assumptions. Tiny sample wins are noise.
