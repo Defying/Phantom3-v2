@@ -190,10 +190,12 @@ async function createStore(args: {
   config: AppConfig;
   exchange?: LiveExchangeGateway;
   liveVenueSnapshot?: () => Promise<LiveVenueStateSnapshot>;
+  liveSetupError?: string;
 }): Promise<RuntimeStore> {
   const store = new RuntimeStore(args.config, {
     liveExchange: args.exchange,
     liveVenueSnapshot: args.liveVenueSnapshot,
+    liveSetupError: args.liveSetupError,
     marketFetcher: createMarketFetcher(nowIso())
   });
   await store.init();
@@ -237,6 +239,36 @@ test('live arming stays fail-closed while the adapter path is still scaffold-onl
     assert.equal(live.liveAdapterReady, false);
     assert.equal(live.canArm, false);
     await assert.rejects(() => liveStore.armLive(), /not ready|disabled|not installed/i);
+  } finally {
+    await flushStore(store);
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+
+test('live arming reports wallet setup errors when the gateway fails closed', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'wraith-live-runtime-'));
+  let store: RuntimeStore | null = null;
+  try {
+    store = await createStore({
+      config: makeConfig(dir, {
+        liveExecution: {
+          enabled: true,
+          venue: 'polymarket',
+          maxQuoteAgeMs: 60_000,
+          maxReconcileAgeMs: 60_000,
+          missingOrderGraceMs: 30_000
+        }
+      }),
+      liveSetupError: 'Polymarket wallet/auth setup failed: missing private key'
+    });
+
+    const liveStore = store;
+    const live = liveStore.getState().execution.live;
+    assert.equal(live.status, 'scaffold');
+    assert.equal(live.liveAdapterReady, false);
+    assert.match(live.blockingReason ?? '', /wallet\/auth setup failed/i);
+    await assert.rejects(() => liveStore.armLive(), /wallet\/auth setup failed/i);
   } finally {
     await flushStore(store);
     await rm(dir, { recursive: true, force: true });

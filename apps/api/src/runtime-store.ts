@@ -94,6 +94,7 @@ type FlattenResult = { ok: true; submitted: number; reconciling: number; skipped
 export type RuntimeStoreOptions = {
   liveExchange?: LiveExchangeGateway | null;
   liveVenueSnapshot?: (() => Promise<LiveVenueStateSnapshot>) | null;
+  liveSetupError?: string | null;
   marketFetcher?: typeof fetchTopMarkets;
 };
 
@@ -350,6 +351,7 @@ export class RuntimeStore {
   private readonly paperExecution: PaperExecutionAdapter;
   private readonly liveExecution: LiveExecutionAdapter | null;
   private readonly liveVenueSnapshot: (() => Promise<LiveVenueStateSnapshot>) | null;
+  private readonly liveSetupError: string | null;
   private readonly marketFetcher: typeof fetchTopMarkets;
   private state: RuntimeState;
   private strategySnapshots: StrategyStateSnapshot[] = [];
@@ -367,6 +369,7 @@ export class RuntimeStore {
     this.ledger = new JsonlLedger({ directory: config.dataDir });
     this.paperExecution = new PaperExecutionAdapter(this.ledger);
     this.liveVenueSnapshot = options.liveVenueSnapshot ?? null;
+    this.liveSetupError = options.liveSetupError ?? null;
     this.marketFetcher = options.marketFetcher ?? fetchTopMarkets;
     this.liveExecution = config.liveModeEnabled && config.liveExecution.enabled && options.liveExchange
       ? new LiveExecutionAdapter(this.ledger, options.liveExchange, config.liveExecution)
@@ -902,7 +905,7 @@ export class RuntimeStore {
       blockingReason = 'Live control plane is configured, but venue-backed live execution is disabled for this process.';
     } else if (!this.liveExecution) {
       status = 'scaffold';
-      blockingReason = 'Live control plane is configured, but the operator live exchange gateway is not installed yet.';
+      blockingReason = this.liveSetupError ?? 'Live control plane is configured, but the operator live exchange gateway is not installed yet.';
     } else if (!this.liveVenueSnapshot) {
       status = 'scaffold';
       blockingReason = 'Live control plane is configured, but the startup venue snapshot path is not installed yet.';

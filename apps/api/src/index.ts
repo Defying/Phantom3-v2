@@ -6,16 +6,71 @@ import fastifyWebsocket from '@fastify/websocket';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readConfig } from '../../../packages/config/src/index.js';
+import { PolymarketLiveClient, PolymarketLiveGateway } from '../../../packages/live-execution/src/polymarket-client.js';
 import { scanUpDownEdge } from '../../../packages/market-data/src/updown-edge.js';
-import { RuntimeStore } from './runtime-store.js';
+import { RuntimeStore, type RuntimeStoreOptions } from './runtime-store.js';
 
 const config = readConfig();
 const app = fastify({ logger: true });
-const store = new RuntimeStore(config);
+let store: RuntimeStore;
+let liveSetupError: string | null = null;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const webRoot = join(__dirname, '../../web/dist');
+
+
+function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function walletReadiness() {
+  const venue = config.liveExecution.polymarket;
+  const auth = venue.auth;
+  return {
+    liveModeEnabled: config.liveModeEnabled,
+    liveArmingEnabled: config.liveArmingEnabled,
+    liveExecutionEnabled: config.liveExecution.enabled,
+    venue: config.liveExecution.venue,
+    clobHost: venue.host,
+    chainId: venue.chainId,
+    signatureType: auth.signatureType,
+    funderAddressConfigured: auth.funderAddress !== null,
+    funderAddress: auth.funderAddress,
+    privateKeyConfigured: auth.hasPrivateKey,
+    apiCredentialsConfigured: auth.hasApiCredentials,
+    allowApiKeyDerivation: auth.allowApiKeyDerivation,
+    needsApiKeyDerivation: auth.needsApiKeyDerivation,
+    canAccessAuthenticatedApi: auth.canAccessAuthenticatedApi,
+    configCanPlaceOrders: auth.canPlaceOrders,
+    gatewayInstalled: Boolean(store && store.getState().execution.live.liveAdapterReady),
+    setupError: liveSetupError,
+    safeToLog: true
+  };
+}
+
+async function createRuntimeOptions(): Promise<RuntimeStoreOptions> {
+  if (!config.liveModeEnabled || !config.liveExecution.enabled) {
+    return {};
+  }
+  if (config.liveExecution.venue !== 'polymarket') {
+    liveSetupError = `Unsupported live execution venue: ${config.liveExecution.venue}`;
+    return { liveSetupError };
+  }
+
+  try {
+    const client = await PolymarketLiveClient.fromConfig(config.liveExecution.polymarket);
+    const gateway = new PolymarketLiveGateway(client, { postOnly: true });
+    return {
+      liveExchange: gateway,
+      liveVenueSnapshot: () => gateway.fetchVenueStateSnapshot()
+    };
+  } catch (error) {
+    liveSetupError = `Polymarket wallet/auth setup failed: ${describeError(error)}`;
+    app.log.warn({ err: liveSetupError }, 'Live execution gateway disabled fail-closed.');
+    return { liveSetupError };
+  }
+}
 
 function isAuthorized(headers: Record<string, unknown>): boolean {
   const bearer = typeof headers.authorization === 'string' && headers.authorization.startsWith('Bearer ')
@@ -47,6 +102,7 @@ function readLimit(query: unknown, fallback: number, maximum: number): number {
 }
 
 async function main(): Promise<void> {
+  store = new RuntimeStore(config, await createRuntimeOptions());
   await store.init();
 
   await app.register(fastifyWebsocket);
@@ -72,6 +128,7 @@ async function main(): Promise<void> {
   app.get('/api/runtime', async () => store.getState());
   app.get('/api/runtime/strategy', async () => store.getStrategySummary());
   app.get('/api/runtime/execution', async () => store.getState().execution);
+  app.get('/api/live/wallet', async () => walletReadiness());
 
   app.get('/api/paper/strategy', async (request, reply) => {
     const paperStrategy = store.getPaperStrategyView(readLimit(request.query, 6, 12));
@@ -105,6 +162,7 @@ async function main(): Promise<void> {
     paperStrategyEndpoint: '/api/paper/strategy',
     paperStrategySnapshotsEndpoint: '/api/paper/strategy/snapshots',
     upDownScanEndpoint: '/api/updown-scan',
+    liveWalletEndpoint: '/api/live/wallet',
     controlEndpoints: {
       pause: '/api/control/pause',
       resume: '/api/control/resume',

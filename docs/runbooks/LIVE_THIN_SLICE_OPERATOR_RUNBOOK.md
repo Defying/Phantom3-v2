@@ -18,10 +18,25 @@ The presence of live flags, endpoints, or adapter code does **not** mean Wraith 
 5. **Do not treat `npm run verify:live-safety` as a live-readiness certificate.**
    It is a guardrail gate. It does not prove venue integration, restart safety, or production operator readiness.
 
+## Wallet/auth status
+
+Wraith now has a wallet/auth wiring path for Polymarket, but that only removes the “no signer exists” blocker. It does **not** make live capital safe.
+
+Sanitized readiness is exposed at `/api/live/wallet`. It reports whether a private key, L2 API credentials, API-key derivation permission, signature type, funder address, and live gateway are configured. It never returns the private key, API secret, or passphrase.
+
+Required env for a wallet-backed live gateway:
+
+- `WRAITH_POLYMARKET_PRIVATE_KEY` — 0x-prefixed Polygon signer private key; keep this out of git/logs.
+- `WRAITH_POLYMARKET_SIGNATURE_TYPE` — Polymarket signature type; non-EOA/proxy types require a funder.
+- `WRAITH_POLYMARKET_FUNDER_ADDRESS` — required for signature types 1-3.
+- Either all three existing L2 API credentials (`WRAITH_POLYMARKET_API_KEY`, `WRAITH_POLYMARKET_API_SECRET`, `WRAITH_POLYMARKET_API_PASSPHRASE`) or `WRAITH_POLYMARKET_ALLOW_API_KEY_DERIVATION=true`.
+
+If wallet/auth initialization fails, the API process starts fail-closed: live arming stays scaffold/blocked and the blocking reason includes the wallet/auth setup error.
+
 ## Current concrete blockers
 
-### 1) Boot reconcile is not wired end-to-end
-`apps/api/src/runtime-store.ts` still boots the app as a paper-authoritative runtime. It does not fetch venue orders, venue fills, or venue balances/positions before allowing live control actions.
+### 1) Boot reconcile must be proven on real venue state
+`apps/api/src/index.ts` can now install a Polymarket wallet-backed gateway when live env is complete, and `runtime-store.ts` can run startup reconciliation from that gateway. This still needs a real traced dry/live review on the intended wallet before live capital: open orders, fills, positions, and kill-switch behavior must be proven from venue evidence, not just unit tests.
 
 ### 2) Unmatched venue evidence still needs caller-side incident handling
 `packages/live-execution/src/index.ts` now surfaces both `unmatchedVenueOrderIds` and `unmatchedVenueFillIds` from reconciliation, but the runtime still has to turn those results into incidents / kill-switch latches. Reporting the mismatch is not the same as making the session safe.
