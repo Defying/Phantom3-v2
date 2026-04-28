@@ -37,7 +37,7 @@ The scanner emits a capped Kelly fraction. For paper/live experiments, treat thi
 4. Run `npm run evaluate:updown` after markets resolve to score candidate hit rate and unit P&L against the Coinbase proxy.
 5. Paper trade only `CANDIDATE` rows.
 6. Record fill price, market close result, modeled probability, edge, and blocker state.
-7. Promote to live only after enough paper samples show positive realized EV after spread/slippage.
+7. Only consider a live review after enough paper samples show positive realized EV after spread/slippage, and only after the live-runbook evidence gates are complete.
 
 ## No-go rules
 
@@ -49,7 +49,7 @@ The scanner emits a capped Kelly fraction. For paper/live experiments, treat thi
 
 ## Zero-dollar simulation mode
 
-When there is no USDC to trade, Wraith should keep learning without touching the wallet.
+When there is no live Polymarket trading collateral available, Wraith should keep learning without touching the wallet. In CLOB V2, that live collateral is pUSD, not raw USDC.e.
 
 - `npm run observe:updown` records every scanner row to `data/updown-observations.jsonl`.
 - `npm run simulate:updown` replays resolved observations across threshold sweeps and reports hit rate, unit P&L, implied ROI, drawdown, and example trades.

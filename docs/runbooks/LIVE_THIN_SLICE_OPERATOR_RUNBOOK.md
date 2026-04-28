@@ -1,7 +1,7 @@
 # Live thin-slice operator runbook
 
 Status: planned / **no-go for live capital**
-Updated: 2026-04-22
+Updated: 2026-04-28
 
 This file exists to prevent operator overconfidence.
 The presence of live flags, endpoints, or adapter code does **not** mean Wraith is ready to trade real money.
@@ -12,7 +12,7 @@ The presence of live flags, endpoints, or adapter code does **not** mean Wraith 
 2. **Do not infer readiness from config flags.**
    `WRAITH_ENABLE_LIVE_MODE`, `WRAITH_ENABLE_LIVE_ARMING`, and `WRAITH_LIVE_EXECUTION_ENABLED` are scaffolding gates, not a safety checklist.
 3. **Do not infer readiness from control endpoints.**
-   `/api/control/live/*`, `/api/control/flatten`, and `/api/control/kill-switch/*` exist, but the main API runtime still does not run a venue-backed boot reconciliation flow.
+   `/api/control/live/*`, `/api/control/flatten`, and `/api/control/kill-switch/*` exist, and the main API runtime has startup-reconcile scaffolding when a live gateway is installed. That is still not a completed live-readiness proof.
 4. **Do not auto-resume after restart.**
    Restart recovery is a design requirement in `docs/architecture/MILESTONE_3_LIVE_TRADING_THIN_SLICE.md`, not an operator-safe runtime path yet.
 5. **Do not treat `npm run verify:live-safety` as a live-readiness certificate.**
@@ -30,6 +30,14 @@ Required env for a wallet-backed live gateway:
 - `WRAITH_POLYMARKET_SIGNATURE_TYPE` — Polymarket signature type; non-EOA/proxy types require a funder.
 - `WRAITH_POLYMARKET_FUNDER_ADDRESS` — required for signature types 1-3.
 - Either all three existing L2 API credentials (`WRAITH_POLYMARKET_API_KEY`, `WRAITH_POLYMARKET_API_SECRET`, `WRAITH_POLYMARKET_API_PASSPHRASE`) or `WRAITH_POLYMARKET_ALLOW_API_KEY_DERIVATION=true`.
+
+CLOB V2 live trading also requires collateral readiness that `/api/live/wallet` does **not** currently prove:
+
+- BUY orders require pUSD balance and pUSD allowance on the funder address, including fee headroom.
+- SELL/flatten orders require outcome-token balance and allowance.
+- EOA signature type `0` also needs POL for gas.
+- A wallet can hold USDC.e and still be unable to buy if it has not been wrapped/credited as pUSD.
+- Wraith does **not** auto-wrap USDC.e to pUSD, does not call the CollateralOnramp, and must not hide collateral migration inside this repo without explicit operator approval.
 
 If wallet/auth initialization fails, the API process starts fail-closed: live arming stays scaffold/blocked and the blocking reason includes the wallet/auth setup error.
 
@@ -65,6 +73,7 @@ Before anyone says “ready for live review,” require all of this:
 - one flatten trace that ends flat from venue fill evidence
 - one restart/reconcile trace during open live state
 - one incident trace showing unmatched venue order/fill evidence blocks new entries
+- one pUSD collateral-readiness trace proving the intended funder has pUSD balance/allowance and, for EOA signing, enough POL for gas
 
 If any of those are missing, ambiguous, or only simulated in UI state, the answer is still **no-go**.
 

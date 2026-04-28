@@ -11,7 +11,7 @@ Date: `__________________`
 - [ ] `npm run check` passes
 - [ ] `npm run build:web` passes
 - [ ] `npm run verify:paper-safe` passes
-- [ ] README and milestone docs still state that live execution is not implemented
+- [ ] README and milestone docs still warn that live execution/control scaffolding is not live-capital readiness
 - [ ] control token is not left at the example value in `.env`
 
 ## 2) Startup smoke test

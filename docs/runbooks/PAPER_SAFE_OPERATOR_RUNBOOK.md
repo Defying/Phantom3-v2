@@ -7,7 +7,7 @@ This runbook is for supervised paper-only sessions.
 Read these as hard warnings, not suggestions:
 
 1. **This repo is not live-trading ready.**
-   Live execution is intentionally not implemented in this milestone.
+   Live execution/control scaffolding may exist, but this milestone is paper-safe only. Do not load live credentials for paper sessions.
 
 2. **Paper-safe is not profit-safe.**
    A clean paper session does not prove edge, fill quality, or live readiness.
