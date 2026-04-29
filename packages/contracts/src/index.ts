@@ -164,6 +164,24 @@ export type RuntimeLiveControlStatus = z.infer<typeof runtimeLiveControlStatusSc
 export const runtimeFlattenPathSchema = z.enum(['paper', 'live', 'blocked']);
 export type RuntimeFlattenPath = z.infer<typeof runtimeFlattenPathSchema>;
 
+export const runtimeLiveReadinessStatusSchema = z.enum(['not-required', 'unknown', 'ready', 'blocked']);
+export type RuntimeLiveReadinessStatus = z.infer<typeof runtimeLiveReadinessStatusSchema>;
+
+export const runtimeLiveCollateralReadinessSchema = z.object({
+  status: runtimeLiveReadinessStatusSchema,
+  checkedAt: z.string().nullable(),
+  stale: z.boolean(),
+  pUsdBalance: z.number().nonnegative().nullable(),
+  pUsdAllowance: z.number().nonnegative().nullable(),
+  requiredPUsdBalance: z.number().nonnegative(),
+  requiredPUsdAllowance: z.number().nonnegative(),
+  polGasBalance: z.number().nonnegative().nullable(),
+  requiredPolGas: z.number().nonnegative(),
+  blockingReasons: z.array(z.string()),
+  safeToLog: z.literal(true)
+});
+export type RuntimeLiveCollateralReadiness = z.infer<typeof runtimeLiveCollateralReadinessSchema>;
+
 export const runtimeLiveControlSchema = z.object({
   configured: z.boolean(),
   armable: z.boolean(),
@@ -176,6 +194,7 @@ export const runtimeLiveControlSchema = z.object({
   killSwitchReason: z.string().nullable(),
   flattenSupported: z.boolean(),
   flattenPath: runtimeFlattenPathSchema,
+  collateralReadiness: runtimeLiveCollateralReadinessSchema,
   lastOperatorAction: z.string().nullable(),
   lastOperatorActionAt: z.string().nullable(),
   summary: z.string()

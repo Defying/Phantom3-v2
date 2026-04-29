@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { ApiError, Side, type ApiKeyCreds, type MarketDetails, type OpenOrder, type Trade, type TradesPaginatedResponse } from '@polymarket/clob-client-v2';
+import { ApiError, AssetType, Side, type ApiKeyCreds, type MarketDetails, type OpenOrder, type Trade, type TradesPaginatedResponse } from '@polymarket/clob-client-v2';
 import type { PolymarketLiveVenueConfig } from '../../config/src/index.js';
 import { PolymarketLiveClient, type PolymarketSdkClientFactoryInput, type PolymarketSdkClientLike } from './polymarket-client.js';
 
@@ -16,6 +16,7 @@ function makeConfig(overrides: Partial<PolymarketLiveVenueConfig> = {}): Polymar
     host: 'https://clob.polymarket.com',
     chainId: 137,
     useServerTime: true,
+    polygonRpcUrl: null,
     auth: {
       signatureType: 0,
       funderAddress: null,
@@ -104,6 +105,108 @@ function makeTradePage(trades: Trade[]): TradesPaginatedResponse {
   };
 }
 
+async function getBalanceAllowance(params: { asset_type: AssetType; token_id?: string }) {
+  return params.asset_type === AssetType.COLLATERAL
+    ? { balance: '25000000', allowance: '25000000' }
+    : { balance: '10000000', allowance: '10000000' };
+}
+
+test('fetchCollateralReadiness proves pUSD allowance and POL gas with sanitized fields', async () => {
+  const calls: Array<{ asset_type: AssetType; token_id?: string }> = [];
+  const sdk: PolymarketSdkClientLike = {
+    async createOrDeriveApiKey(): Promise<ApiKeyCreds> {
+      return { key: 'unused', secret: 'unused', passphrase: 'unused' };
+    },
+    async createAndPostOrder() {
+      throw new Error('not used');
+    },
+    async getOrder() {
+      throw new Error('not used');
+    },
+    async getOpenOrders() {
+      return [];
+    },
+    async getTradesPaginated() {
+      return makeTradePage([]);
+    },
+    async cancelOrder() {
+      return {};
+    },
+    async postHeartbeat() {
+      return { heartbeat_id: 'hb-1' };
+    },
+    async getClobMarketInfo() {
+      return makeMarketDetails();
+    },
+    async getBalanceAllowance(params) {
+      calls.push(params);
+      return { balance: '25000000', allowance: '50000000' };
+    }
+  };
+
+  const client = new PolymarketLiveClient(sdk, makeConfig(), {
+    clock,
+    nativeBalanceReader: async () => 100000000000000000n
+  });
+  const readiness = await client.fetchCollateralReadiness({
+    requiredBalance: 10,
+    requiredAllowance: 20,
+    requiredPolGas: 0.05
+  });
+
+  assert.equal(readiness.status, 'ready');
+  assert.equal(readiness.balance, 25);
+  assert.equal(readiness.allowance, 50);
+  assert.equal(readiness.polGasBalance, 0.1);
+  assert.deepEqual(calls, [{ asset_type: AssetType.COLLATERAL }]);
+  assert.equal(readiness.safeToLog, true);
+});
+
+test('fetchConditionalTokenReadiness blocks when outcome-token allowance is insufficient', async () => {
+  const sdk: PolymarketSdkClientLike = {
+    async createOrDeriveApiKey(): Promise<ApiKeyCreds> {
+      return { key: 'unused', secret: 'unused', passphrase: 'unused' };
+    },
+    async createAndPostOrder() {
+      throw new Error('not used');
+    },
+    async getOrder() {
+      throw new Error('not used');
+    },
+    async getOpenOrders() {
+      return [];
+    },
+    async getTradesPaginated() {
+      return makeTradePage([]);
+    },
+    async cancelOrder() {
+      return {};
+    },
+    async postHeartbeat() {
+      return { heartbeat_id: 'hb-1' };
+    },
+    async getClobMarketInfo() {
+      return makeMarketDetails();
+    },
+    async getBalanceAllowance(params) {
+      assert.deepEqual(params, { asset_type: AssetType.CONDITIONAL, token_id: 'token-yes' });
+      return { balance: '10000000', allowance: '1000000' };
+    }
+  };
+
+  const client = new PolymarketLiveClient(sdk, makeConfig(), { clock });
+  const readiness = await client.fetchConditionalTokenReadiness({
+    tokenId: 'token-yes',
+    requiredBalance: 5,
+    requiredAllowance: 5
+  });
+
+  assert.equal(readiness.status, 'blocked');
+  assert.equal(readiness.balance, 10);
+  assert.equal(readiness.allowance, 1);
+  assert.match(readiness.blockingReasons[0] ?? '', /allowance/i);
+});
+
 test('submitLimitOrder normalizes Polymarket order and fill evidence into live adapter shapes', async () => {
   const sdk: PolymarketSdkClientLike = {
     async createOrDeriveApiKey(): Promise<ApiKeyCreds> {
@@ -137,7 +240,8 @@ test('submitLimitOrder normalizes Polymarket order and fill evidence into live a
     },
     async getClobMarketInfo() {
       return makeMarketDetails();
-    }
+    },
+    getBalanceAllowance
   };
 
   const client = new PolymarketLiveClient(sdk, makeConfig(), { clock });
@@ -192,7 +296,8 @@ test('submitLimitOrder classifies explicit Polymarket API failures as rejected, 
     },
     async getClobMarketInfo() {
       return makeMarketDetails();
-    }
+    },
+    getBalanceAllowance
   };
 
   const client = new PolymarketLiveClient(sdk, makeConfig(), { clock });
@@ -241,7 +346,8 @@ test('fromConfig derives missing API credentials once and upgrades the returned 
     },
     async getClobMarketInfo() {
       return makeMarketDetails();
-    }
+    },
+    getBalanceAllowance
   };
   const postAuthClient: PolymarketSdkClientLike = {
     ...preAuthClient,

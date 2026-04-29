@@ -52,10 +52,15 @@ function makeConfig(dir: string, overrides: ConfigOverrides = {}): AppConfig {
     maxQuoteAgeMs: 60_000,
     maxReconcileAgeMs: 60_000,
     missingOrderGraceMs: 30_000,
+    readinessMaxAgeMs: 60_000,
+    minPusdBalance: 1,
+    minPusdAllowance: 1,
+    minPolGas: 0,
     polymarket: {
       host: 'https://clob.polymarket.com',
       chainId: 137,
       useServerTime: true,
+      polygonRpcUrl: null,
       auth: {
         signatureType: 0,
         funderAddress: null,
@@ -121,8 +126,40 @@ function createVenueSnapshot(timestamp: string, positions: LiveVenueStateSnapsho
   };
 }
 
-function createExchange(requests: LiveSubmitOrderRequest[]): LiveExchangeGateway {
+function createExchange(requests: LiveSubmitOrderRequest[], readiness: { collateralReady?: boolean; conditionalReady?: boolean } = {}): LiveExchangeGateway {
   return {
+    async getCollateralReadiness(input) {
+      const ready = readiness.collateralReady ?? true;
+      return {
+        status: ready ? 'ready' : 'blocked',
+        checkedAt: nowIso(),
+        assetType: 'collateral',
+        tokenId: null,
+        balance: ready ? input.requiredBalance + 10 : 0,
+        allowance: ready ? input.requiredAllowance + 10 : 0,
+        requiredBalance: input.requiredBalance,
+        requiredAllowance: input.requiredAllowance,
+        polGasBalance: input.requiredPolGas,
+        requiredPolGas: input.requiredPolGas,
+        blockingReasons: ready ? [] : ['mock pUSD collateral is insufficient'],
+        safeToLog: true
+      };
+    },
+    async getConditionalTokenReadiness(input) {
+      const ready = readiness.conditionalReady ?? true;
+      return {
+        status: ready ? 'ready' : 'blocked',
+        checkedAt: nowIso(),
+        assetType: 'conditional',
+        tokenId: input.tokenId,
+        balance: ready ? input.requiredBalance + 10 : 0,
+        allowance: ready ? input.requiredAllowance + 10 : 0,
+        requiredBalance: input.requiredBalance,
+        requiredAllowance: input.requiredAllowance,
+        blockingReasons: ready ? [] : ['mock conditional-token allowance is insufficient'],
+        safeToLog: true
+      };
+    },
     async submitOrder(request) {
       requests.push(request);
       const observedAt = nowIso();
@@ -616,6 +653,94 @@ test('live flatten stays reduce-only and kill-switch release fails closed with o
     assert.equal(flatten.submitted, 1);
     assert.equal(requests.at(-1)?.intent.side, 'sell');
     assert.equal(requests.at(-1)?.intent.reduceOnly, true);
+  } finally {
+    await flushStore(store);
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('live arming stays blocked when pUSD collateral readiness is insufficient', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'wraith-live-runtime-'));
+  let store: RuntimeStore | null = null;
+  try {
+    const config = makeConfig(dir, {
+      liveExecution: {
+        enabled: true,
+        venue: 'polymarket',
+        maxQuoteAgeMs: 60_000,
+        maxReconcileAgeMs: 60_000,
+        missingOrderGraceMs: 30_000
+      }
+    });
+    const requests: LiveSubmitOrderRequest[] = [];
+    const exchange = createExchange(requests, { collateralReady: false });
+
+    store = await createStore({
+      config,
+      exchange,
+      liveVenueSnapshot: async () => createVenueSnapshot(nowIso())
+    });
+
+    const live = store.getState().execution.live;
+    assert.equal(live.status, 'blocked-by-reconcile');
+    assert.equal(live.canArm, false);
+    assert.equal(live.collateralReadiness.status, 'blocked');
+    assert.match(live.blockingReason ?? '', /pUSD|collateral/i);
+    await assert.rejects(() => store!.armLive(), /pUSD|collateral/i);
+  } finally {
+    await flushStore(store);
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('live flatten blocks before submitting when conditional-token readiness is insufficient', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'wraith-live-runtime-'));
+  let store: RuntimeStore | null = null;
+  try {
+    const config = makeConfig(dir, {
+      liveExecution: {
+        enabled: true,
+        venue: 'polymarket',
+        maxQuoteAgeMs: 60_000,
+        maxReconcileAgeMs: 60_000,
+        missingOrderGraceMs: 30_000
+      }
+    });
+    const requests: LiveSubmitOrderRequest[] = [];
+    const exchange = createExchange(requests, { conditionalReady: false });
+
+    store = await createStore({
+      config,
+      exchange,
+      liveVenueSnapshot: async () => createVenueSnapshot(nowIso())
+    });
+
+    const internal = store as any;
+    const quote = createPaperQuote(market, 'yes', nowIso());
+    assert.ok(quote, 'expected a usable quote for the seeded test market');
+
+    await internal.liveExecution.submitApprovedIntent({
+      intent: {
+        sessionId: 'seed-live-position',
+        intentId: 'seed-intent',
+        strategyId: 'seed-strategy',
+        marketId: market.id,
+        tokenId: market.yesTokenId ?? 'token-yes',
+        side: 'buy',
+        limitPrice: market.yesPrice ?? 0.44,
+        quantity: 10,
+        approvedAt: nowIso(),
+        thesis: 'Seed a reconciled live position for conditional readiness tests.'
+      },
+      quote
+    });
+    await internal.refreshExecutionState();
+
+    const flatten = await store.flattenOpenPositions();
+    assert.equal(flatten.submitted, 0);
+    assert.equal(flatten.skipped, 1);
+    assert.match(flatten.errors[0] ?? '', /conditional-token allowance|Conditional token/i);
+    assert.equal(requests.filter((request) => request.intent.side === 'sell').length, 0);
   } finally {
     await flushStore(store);
     await rm(dir, { recursive: true, force: true });

@@ -16,6 +16,7 @@ const polymarketEnvSchema = z.object({
   WRAITH_POLYMARKET_CHAIN_ID: z.coerce.number().int().default(137),
   WRAITH_POLYMARKET_SIGNATURE_TYPE: z.coerce.number().int().default(0),
   WRAITH_POLYMARKET_USE_SERVER_TIME: z.string().default('true'),
+  WRAITH_POLYGON_RPC_URL: z.string().default(''),
   WRAITH_POLYMARKET_ALLOW_API_KEY_DERIVATION: z.string().default('false'),
   WRAITH_POLYMARKET_FUNDER_ADDRESS: z.string().default(''),
   WRAITH_POLYMARKET_PRIVATE_KEY: z.string().default(''),
@@ -41,6 +42,10 @@ const envSchema = z.object({
   WRAITH_LIVE_MAX_QUOTE_AGE_MS: z.coerce.number().int().nonnegative().default(5000),
   WRAITH_LIVE_MAX_RECONCILE_AGE_MS: z.coerce.number().int().positive().default(15000),
   WRAITH_LIVE_MISSING_ORDER_GRACE_MS: z.coerce.number().int().positive().default(30000),
+  WRAITH_LIVE_READINESS_MAX_AGE_MS: z.coerce.number().int().positive().default(30000),
+  WRAITH_LIVE_MIN_PUSD_BALANCE: z.coerce.number().nonnegative().default(1),
+  WRAITH_LIVE_MIN_PUSD_ALLOWANCE: z.coerce.number().nonnegative().default(1),
+  WRAITH_LIVE_MIN_POL_GAS: z.coerce.number().nonnegative().default(0.05),
   WRAITH_CONTROL_TOKEN: z.string().min(16, 'WRAITH_CONTROL_TOKEN must be at least 16 characters')
 }).extend(polymarketEnvSchema.shape);
 
@@ -89,6 +94,7 @@ export type PolymarketLiveVenueConfig = {
   host: string;
   chainId: PolymarketChainId;
   useServerTime: boolean;
+  polygonRpcUrl: string | null;
   auth: PolymarketLiveAuthConfig;
 };
 
@@ -98,6 +104,10 @@ export type LiveExecutionAppConfig = {
   maxQuoteAgeMs: number;
   maxReconcileAgeMs: number;
   missingOrderGraceMs: number;
+  readinessMaxAgeMs: number;
+  minPusdBalance: number;
+  minPusdAllowance: number;
+  minPolGas: number;
   polymarket: PolymarketLiveVenueConfig;
 };
 
@@ -150,6 +160,7 @@ function readDisabledPolymarketLiveVenueConfig(parsed: z.infer<typeof polymarket
     host: parsed.WRAITH_POLYMARKET_CLOB_HOST,
     chainId: polymarketChainIdSchema.parse(parsed.WRAITH_POLYMARKET_CHAIN_ID),
     useServerTime: readFlag(parsed.WRAITH_POLYMARKET_USE_SERVER_TIME),
+    polygonRpcUrl: readOptionalSecret(parsed.WRAITH_POLYGON_RPC_URL),
     auth: {
       signatureType: 0,
       funderAddress: null,
@@ -192,6 +203,7 @@ function readPolymarketLiveVenueConfigFromParsedEnv(parsed: z.infer<typeof polym
     host: parsed.WRAITH_POLYMARKET_CLOB_HOST,
     chainId,
     useServerTime: readFlag(parsed.WRAITH_POLYMARKET_USE_SERVER_TIME),
+    polygonRpcUrl: readOptionalSecret(parsed.WRAITH_POLYGON_RPC_URL),
     auth: {
       signatureType,
       funderAddress,
@@ -235,6 +247,10 @@ export function readConfig(): AppConfig {
       maxQuoteAgeMs: parsed.WRAITH_LIVE_MAX_QUOTE_AGE_MS,
       maxReconcileAgeMs: parsed.WRAITH_LIVE_MAX_RECONCILE_AGE_MS,
       missingOrderGraceMs: parsed.WRAITH_LIVE_MISSING_ORDER_GRACE_MS,
+      readinessMaxAgeMs: parsed.WRAITH_LIVE_READINESS_MAX_AGE_MS,
+      minPusdBalance: parsed.WRAITH_LIVE_MIN_PUSD_BALANCE,
+      minPusdAllowance: parsed.WRAITH_LIVE_MIN_PUSD_ALLOWANCE,
+      minPolGas: parsed.WRAITH_LIVE_MIN_POL_GAS,
       polymarket: simulationMode ? readDisabledPolymarketLiveVenueConfig(parsed) : readPolymarketLiveVenueConfigFromParsedEnv(parsed)
     },
     controlToken: parsed.WRAITH_CONTROL_TOKEN

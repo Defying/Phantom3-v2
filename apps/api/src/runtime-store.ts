@@ -7,6 +7,7 @@ import type {
   RiskDecisionSummary,
   RuntimeEvent,
   RuntimeExecutionSummary,
+  RuntimeLiveCollateralReadiness,
   RuntimeLiveControl,
   RuntimeMarket,
   RuntimeMarketData,
@@ -28,6 +29,7 @@ import {
 } from '../../../packages/ledger/src/index.js';
 import {
   LiveExecutionAdapter,
+  type LiveAssetReadinessResult,
   type LiveExchangeGateway,
   type LiveExecutionResult,
   type LiveStartupReconciliationResult,
@@ -108,16 +110,75 @@ type LiveProjectionState = {
   blockingReason: string | null;
 };
 
+function createCollateralReadiness(
+  config: AppConfig,
+  overrides: Partial<RuntimeLiveCollateralReadiness> = {}
+): RuntimeLiveCollateralReadiness {
+  const required = config.liveModeEnabled && config.liveArmingEnabled;
+  return {
+    status: required ? 'unknown' : 'not-required',
+    checkedAt: null,
+    stale: required,
+    pUsdBalance: null,
+    pUsdAllowance: null,
+    requiredPUsdBalance: config.liveExecution.minPusdBalance,
+    requiredPUsdAllowance: config.liveExecution.minPusdAllowance,
+    polGasBalance: null,
+    requiredPolGas: config.liveExecution.minPolGas,
+    blockingReasons: required ? ['pUSD collateral readiness has not been checked yet.'] : [],
+    safeToLog: true,
+    ...overrides
+  } satisfies RuntimeLiveCollateralReadiness;
+}
+
+function mapCollateralReadiness(config: AppConfig, result: LiveAssetReadinessResult): RuntimeLiveCollateralReadiness {
+  const checkedAt = result.checkedAt;
+  const checkedAtMs = Date.parse(checkedAt);
+  const ageMs = Number.isFinite(checkedAtMs) ? Date.now() - checkedAtMs : Number.POSITIVE_INFINITY;
+  const stale = !Number.isFinite(ageMs) || ageMs > config.liveExecution.readinessMaxAgeMs;
+  const blockingReasons = [...result.blockingReasons];
+
+  if (stale) {
+    blockingReasons.push(`pUSD readiness check is stale; max age is ${config.liveExecution.readinessMaxAgeMs}ms.`);
+  }
+
+  return createCollateralReadiness(config, {
+    status: blockingReasons.length > 0 ? 'blocked' : 'ready',
+    checkedAt,
+    stale,
+    pUsdBalance: result.balance,
+    pUsdAllowance: result.allowance,
+    requiredPUsdBalance: result.requiredBalance,
+    requiredPUsdAllowance: result.requiredAllowance,
+    polGasBalance: result.polGasBalance ?? null,
+    requiredPolGas: result.requiredPolGas ?? config.liveExecution.minPolGas,
+    blockingReasons
+  });
+}
+
+function collateralBlockingReason(readiness: RuntimeLiveCollateralReadiness): string | null {
+  if (readiness.status === 'not-required' || readiness.status === 'ready') {
+    return null;
+  }
+  return readiness.blockingReasons[0] ?? 'pUSD collateral readiness is not proven.';
+}
+
 function buildLiveControlSummary(live: RuntimeLiveControl, mode: RuntimeState['mode'] = 'paper'): string {
   const killSwitchSummary = live.killSwitchActive
     ? ` Kill switch is active${live.killSwitchReason ? ` (${live.killSwitchReason})` : ''}. New automated entries stay blocked until an operator clears it.`
     : '';
+  const collateralReason = collateralBlockingReason(live.collateralReadiness);
+  const collateralSummary = collateralReason
+    ? ` Collateral readiness blocked: ${collateralReason}`
+    : live.collateralReadiness.status === 'ready'
+      ? ' pUSD collateral readiness is fresh.'
+      : '';
 
   switch (live.status) {
     case 'paper-only':
       return 'Paper-safe default. Live control plane is disabled for this process.';
     case 'scaffold':
-      return `${live.blockingReason ?? 'Live control plane is configured, but the live adapter path is still scaffold-only.'} Flatten remains paper-only until a real live adapter is wired.${killSwitchSummary}`.trim();
+      return `${live.blockingReason ?? 'Live control plane is configured, but the live adapter path is still scaffold-only.'} Flatten remains paper-only until a real live adapter is wired.${collateralSummary}${killSwitchSummary}`.trim();
     case 'blocked-by-reconcile': {
       const readinessSummary = live.liveAdapterReady
         ? 'Live adapter path is present, but operator actions are blocked until reconciliation is clean.'
@@ -125,7 +186,7 @@ function buildLiveControlSummary(live: RuntimeLiveControl, mode: RuntimeState['m
       const flattenSummary = live.flattenPath === 'paper'
         ? ' Paper flatten remains available for paper inventory while live controls stay blocked.'
         : ' Flatten is blocked until live orders reconcile cleanly.';
-      return `${readinessSummary} ${live.blockingReason ?? 'Live state still needs reconciliation before arming or flattening.'}${flattenSummary}${killSwitchSummary}`.trim();
+      return `${readinessSummary} ${live.blockingReason ?? 'Live state still needs reconciliation before arming or flattening.'}${flattenSummary}${collateralSummary}${killSwitchSummary}`.trim();
     }
     case 'adapter-ready': {
       const armSummary = live.armed
@@ -139,7 +200,7 @@ function buildLiveControlSummary(live: RuntimeLiveControl, mode: RuntimeState['m
           ? 'Flatten remains paper-only until live inventory appears.'
           : 'Flatten is blocked until live orders reconcile cleanly.';
       const blockingReason = live.blockingReason ? ` ${live.blockingReason}` : '';
-      return `${armSummary} ${flattenSummary} Automated strategy entries remain paper-only until live routing is implemented.${killSwitchSummary}${blockingReason}`.trim();
+      return `${armSummary} ${flattenSummary} Automated strategy entries remain paper-only until live routing is implemented.${collateralSummary}${killSwitchSummary}${blockingReason}`.trim();
     }
   }
 }
@@ -159,6 +220,7 @@ function createInitialLiveControl(config: AppConfig): RuntimeLiveControl {
     killSwitchReason: null,
     flattenSupported: true,
     flattenPath: 'paper',
+    collateralReadiness: createCollateralReadiness(config),
     lastOperatorAction: null,
     lastOperatorActionAt: null,
     summary: ''
@@ -353,6 +415,7 @@ export class RuntimeStore {
   private readonly statePath: string;
   private readonly ledger: JsonlLedger;
   private readonly paperExecution: PaperExecutionAdapter;
+  private readonly liveExchange: LiveExchangeGateway | null;
   private readonly liveExecution: LiveExecutionAdapter | null;
   private readonly liveVenueSnapshot: (() => Promise<LiveVenueStateSnapshot>) | null;
   private readonly liveSetupError: string | null;
@@ -375,11 +438,12 @@ export class RuntimeStore {
     }
     this.ledger = new JsonlLedger({ directory: config.dataDir });
     this.paperExecution = new PaperExecutionAdapter(this.ledger, { executionMode: config.runtimeMode === 'simulation' ? 'simulation' : 'paper' });
+    this.liveExchange = options.liveExchange ?? null;
     this.liveVenueSnapshot = options.liveVenueSnapshot ?? null;
     this.liveSetupError = options.liveSetupError ?? null;
     this.marketFetcher = options.marketFetcher ?? fetchTopMarkets;
-    this.liveExecution = config.liveModeEnabled && config.liveExecution.enabled && options.liveExchange
-      ? new LiveExecutionAdapter(this.ledger, options.liveExchange, config.liveExecution)
+    this.liveExecution = config.liveModeEnabled && config.liveExecution.enabled && this.liveExchange
+      ? new LiveExecutionAdapter(this.ledger, this.liveExchange, config.liveExecution)
       : null;
     this.state = createInitialState(config);
   }
@@ -395,11 +459,13 @@ export class RuntimeStore {
       this.strategySnapshots = this.hydrateStrategySnapshots(existing.strategySnapshots);
       this.state = this.hydrateState(existing);
       this.syncStrategyState('bootstrap', this.currentStrategyPayload(), { recordSnapshot: this.strategySnapshots.length === 0 });
+      await this.refreshLiveCollateralReadiness();
       await this.refreshExecutionState();
       await this.reconcileLiveStartupState('startup');
       this.pushEvent('info', 'Reloaded persisted bootstrap state.');
     } catch {
       this.syncStrategyState('bootstrap', this.currentStrategyPayload());
+      await this.refreshLiveCollateralReadiness();
       await this.refreshExecutionState();
       await this.reconcileLiveStartupState('startup');
       await this.persist();
@@ -447,6 +513,8 @@ export class RuntimeStore {
   }
 
   async armLive(): Promise<{ ok: true; armed: boolean; changed: boolean }> {
+    await this.refreshLiveCollateralReadiness();
+    await this.refreshExecutionState();
     const live = this.state.execution.live;
     if (!live.configured) {
       throw new Error('Live mode is not enabled for this process.');
@@ -770,6 +838,50 @@ export class RuntimeStore {
     this.state.watchlist = buildWatchlist(this.state);
   }
 
+  private async refreshLiveCollateralReadiness(): Promise<void> {
+    if (!this.config.liveModeEnabled || !this.config.liveArmingEnabled) {
+      this.replaceLiveControl({
+        ...this.state.execution.live,
+        collateralReadiness: createCollateralReadiness(this.config)
+      });
+      return;
+    }
+
+    if (!this.liveExchange?.getCollateralReadiness || !this.config.liveExecution.enabled || !this.liveExecution) {
+      this.replaceLiveControl({
+        ...this.state.execution.live,
+        collateralReadiness: createCollateralReadiness(this.config, {
+          status: 'unknown',
+          stale: true,
+          blockingReasons: ['pUSD collateral readiness is unsupported until the live gateway exposes balance/allowance checks.']
+        })
+      });
+      return;
+    }
+
+    try {
+      const readiness = await this.liveExchange.getCollateralReadiness({
+        requiredBalance: this.config.liveExecution.minPusdBalance,
+        requiredAllowance: this.config.liveExecution.minPusdAllowance,
+        requiredPolGas: this.config.liveExecution.minPolGas
+      });
+      this.replaceLiveControl({
+        ...this.state.execution.live,
+        collateralReadiness: mapCollateralReadiness(this.config, readiness)
+      });
+    } catch (error) {
+      this.replaceLiveControl({
+        ...this.state.execution.live,
+        collateralReadiness: createCollateralReadiness(this.config, {
+          status: 'blocked',
+          checkedAt: isoNow(),
+          stale: false,
+          blockingReasons: [`pUSD collateral readiness check failed: ${error instanceof Error ? error.message : 'Unknown readiness error'}`]
+        })
+      });
+    }
+  }
+
   private async refreshExecutionState(projection?: RuntimeProjection): Promise<void> {
     const nextProjection = projection ?? await this.ledger.readProjection();
     const live = this.buildLiveControlState(nextProjection);
@@ -901,6 +1013,7 @@ export class RuntimeStore {
     const killSwitchReason = this.liveExecution ? projection.killSwitch.reason : current.killSwitchReason;
     const startupBlockingReason = this.liveStartupBlockingReason();
     const liveAdapterInstalled = this.liveAdapterInstalled();
+    const collateralReason = collateralBlockingReason(current.collateralReadiness);
 
     let status: RuntimeLiveControl['status'] = 'paper-only';
     let blockingReason: string | null = null;
@@ -924,6 +1037,12 @@ export class RuntimeStore {
     } else if (startupBlockingReason) {
       status = 'blocked-by-reconcile';
       blockingReason = startupBlockingReason;
+      flattenPath = liveProjection.openPositionCount > 0 || liveProjection.activeOrderCount > 0 || liveProjection.reconcileOrderCount > 0 || liveProjection.mixedPositionCount > 0
+        ? 'blocked'
+        : 'paper';
+    } else if (collateralReason) {
+      status = 'blocked-by-reconcile';
+      blockingReason = collateralReason;
       flattenPath = liveProjection.openPositionCount > 0 || liveProjection.activeOrderCount > 0 || liveProjection.reconcileOrderCount > 0 || liveProjection.mixedPositionCount > 0
         ? 'blocked'
         : 'paper';
@@ -1056,6 +1175,19 @@ export class RuntimeStore {
     const liveProjection = this.describeLiveProjection(projection);
     if (liveProjection.blockingReason) {
       throw new Error(`Cannot flatten ${position.positionId}: ${liveProjection.blockingReason}`);
+    }
+
+    if (!this.liveExchange?.getConditionalTokenReadiness) {
+      throw new Error(`Cannot flatten ${position.positionId}: conditional-token balance/allowance readiness is not available for this live gateway.`);
+    }
+
+    const conditionalReadiness = await this.liveExchange.getConditionalTokenReadiness({
+      tokenId: position.tokenId,
+      requiredBalance: position.netQuantity,
+      requiredAllowance: position.netQuantity
+    });
+    if (conditionalReadiness.status !== 'ready') {
+      throw new Error(`Cannot flatten ${position.positionId}: ${conditionalReadiness.blockingReasons[0] ?? 'conditional-token balance/allowance readiness is not proven.'}`);
     }
 
     return this.liveExecution.requestFlatten({

@@ -787,6 +787,10 @@ export function App() {
             <span>Kill switch</span>
             <strong>{liveControl?.killSwitchActive ? 'latched' : 'clear'}</strong>
           </div>
+          <div className="summary-tile">
+            <span>pUSD readiness</span>
+            <strong>{liveControl ? humanizeKey(liveControl.collateralReadiness.status) : '...'}</strong>
+          </div>
         </div>
         <div className="field-grid field-grid-spacious">
           <div className="field-chip">
@@ -799,6 +803,14 @@ export function App() {
               {liveControl?.lastOperatorAction
                 ? `${humanizeKey(liveControl.lastOperatorAction)}${liveControl.lastOperatorActionAt ? ` · ${new Date(liveControl.lastOperatorActionAt).toLocaleString()}` : ''}`
                 : 'none'}
+            </strong>
+          </div>
+          <div className="field-chip">
+            <span>Collateral proof</span>
+            <strong>
+              {liveControl
+                ? `${liveControl.collateralReadiness.pUsdBalance ?? 'unknown'} pUSD / ${liveControl.collateralReadiness.pUsdAllowance ?? 'unknown'} allowance${liveControl.collateralReadiness.blockingReasons.length ? ` · ${liveControl.collateralReadiness.blockingReasons[0]}` : ''}`
+                : 'waiting'}
             </strong>
           </div>
         </div>

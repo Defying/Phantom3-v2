@@ -134,8 +134,37 @@ export type LiveSubmitOrderRequest = {
   quote: PaperQuote;
 };
 
+export type LiveAssetReadinessResult = {
+  status: 'ready' | 'blocked';
+  checkedAt: string;
+  assetType: 'collateral' | 'conditional';
+  tokenId: string | null;
+  balance: number | null;
+  allowance: number | null;
+  requiredBalance: number;
+  requiredAllowance: number;
+  polGasBalance?: number | null;
+  requiredPolGas?: number;
+  blockingReasons: string[];
+  safeToLog: true;
+};
+
+export type LiveCollateralReadinessRequest = {
+  requiredBalance: number;
+  requiredAllowance: number;
+  requiredPolGas: number;
+};
+
+export type LiveConditionalTokenReadinessRequest = {
+  tokenId: string;
+  requiredBalance: number;
+  requiredAllowance: number;
+};
+
 export type LiveExchangeGateway = {
   submitOrder(request: LiveSubmitOrderRequest): Promise<LiveSubmitResult | z.input<typeof liveSubmitResultSchema>>;
+  getCollateralReadiness?(request: LiveCollateralReadinessRequest): Promise<LiveAssetReadinessResult>;
+  getConditionalTokenReadiness?(request: LiveConditionalTokenReadinessRequest): Promise<LiveAssetReadinessResult>;
 };
 
 export type LiveExecutionResult = {

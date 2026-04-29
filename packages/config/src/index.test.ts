@@ -11,6 +11,7 @@ function makeEnv(overrides: Record<string, string | undefined> = {}): Record<str
     WRAITH_POLYMARKET_CHAIN_ID: '137',
     WRAITH_POLYMARKET_SIGNATURE_TYPE: '0',
     WRAITH_POLYMARKET_USE_SERVER_TIME: 'true',
+    WRAITH_POLYGON_RPC_URL: '',
     WRAITH_POLYMARKET_ALLOW_API_KEY_DERIVATION: 'false',
     WRAITH_POLYMARKET_FUNDER_ADDRESS: '',
     WRAITH_POLYMARKET_PRIVATE_KEY: '',
@@ -33,6 +34,7 @@ test('readPolymarketLiveVenueConfig marks derivation-ready auth without overstat
   assert.equal(config.auth.signatureType, 2);
   assert.equal(config.auth.privateKey, PRIVATE_KEY);
   assert.equal(config.auth.funderAddress, FUNDER_ADDRESS);
+  assert.equal(config.polygonRpcUrl, null);
   assert.equal(config.auth.hasPrivateKey, true);
   assert.equal(config.auth.hasApiCredentials, false);
   assert.equal(config.auth.needsApiKeyDerivation, true);
@@ -83,6 +85,10 @@ test('readConfig simulation mode forces live execution disabled even with live f
     assert.equal(config.liveExecution.polymarket.auth.privateKey, null);
     assert.equal(config.liveExecution.polymarket.auth.hasPrivateKey, false);
     assert.equal(config.liveExecution.polymarket.auth.canPlaceOrders, false);
+    assert.equal(config.liveExecution.minPusdBalance, 1);
+    assert.equal(config.liveExecution.minPusdAllowance, 1);
+    assert.equal(config.liveExecution.minPolGas, 0.05);
+    assert.equal(config.liveExecution.readinessMaxAgeMs, 30000);
   } finally {
     process.env = previous;
   }

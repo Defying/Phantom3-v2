@@ -1,17 +1,20 @@
 import {
   ApiError,
+  AssetType,
   Chain,
   ClobClient,
   OrderType,
   Side,
   SignatureTypeV2,
   type ApiKeyCreds,
+  type BalanceAllowanceResponse,
   type MarketDetails,
   type OpenOrder,
   type Trade,
   type TradesPaginatedResponse
 } from '@polymarket/clob-client-v2';
-import { createWalletClient, custom, type Hex, type WalletClient } from 'viem';
+import { createPublicClient, createWalletClient, custom, formatEther, http, type Hex, type WalletClient } from 'viem';
+import { polygon, polygonAmoy } from 'viem/chains';
 import { privateKeyToAccount } from 'viem/accounts';
 import { z } from 'zod';
 import type { PolymarketLiveVenueConfig } from '../../config/src/index.js';
@@ -20,6 +23,9 @@ import {
   liveVenueFillSchema,
   liveVenueOrderSnapshotSchema,
   liveVenueStateSnapshotSchema,
+  type LiveAssetReadinessResult,
+  type LiveCollateralReadinessRequest,
+  type LiveConditionalTokenReadinessRequest,
   type LiveExchangeGateway,
   type LiveSubmitOrderRequest,
   type LiveSubmitResult,
@@ -29,6 +35,7 @@ import {
 } from './index.js';
 
 const END_CURSOR = 'LTE=';
+const TOKEN_DECIMAL_SCALE = 1_000_000;
 
 const polymarketLimitOrderRequestSchema = z.object({
   clientOrderId: z.string().min(1),
@@ -120,6 +127,7 @@ export type PolymarketSdkClientLike = {
   cancelOrder(payload: { orderID: string }): Promise<unknown>;
   postHeartbeat(heartbeatId?: string): Promise<{ heartbeat_id: string; error_msg?: string }>;
   getClobMarketInfo(conditionId: string): Promise<MarketDetails>;
+  getBalanceAllowance(params: { asset_type: AssetType; token_id?: string }): Promise<BalanceAllowanceResponse>;
 };
 
 export type PolymarketSdkClientFactoryInput = {
@@ -188,6 +196,48 @@ function parseNonNegative(value: string | number, label: string): number {
     throw new Error(`Polymarket ${label} must be non-negative. Received ${parsed}.`);
   }
   return parsed;
+}
+
+function parseTokenUnits(value: string | number, label: string): number {
+  if (typeof value === 'number') {
+    return parseNonNegative(value, label);
+  }
+
+  const normalized = value.trim();
+  if (!normalized) {
+    throw new Error(`Polymarket ${label} was empty.`);
+  }
+  if (normalized.includes('.')) {
+    return parseNonNegative(normalized, label);
+  }
+  if (!/^\d+$/.test(normalized)) {
+    return parseNonNegative(normalized, label);
+  }
+
+  const parsed = Number.parseInt(normalized, 10) / TOKEN_DECIMAL_SCALE;
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new Error(`Polymarket ${label} was not a valid 6-decimal token amount: ${value}.`);
+  }
+  return parsed;
+}
+
+function buildAssetReadiness(args: {
+  checkedAt: string;
+  assetType: 'collateral' | 'conditional';
+  tokenId: string | null;
+  balance: number | null;
+  allowance: number | null;
+  requiredBalance: number;
+  requiredAllowance: number;
+  polGasBalance?: number | null;
+  requiredPolGas?: number;
+  blockingReasons: string[];
+}): LiveAssetReadinessResult {
+  return {
+    ...args,
+    status: args.blockingReasons.length > 0 ? 'blocked' : 'ready',
+    safeToLog: true
+  };
 }
 
 function epochToIso(value: number): string {
@@ -273,6 +323,7 @@ function roundFee(value: number): number {
 
 export class PolymarketLiveClient {
   private readonly clock: () => Date;
+  private readonly nativeBalanceReader: (() => Promise<bigint | null>) | null;
   private readonly marketInfoCache = new Map<string, Promise<MarketDetails>>();
 
   constructor(
@@ -280,9 +331,11 @@ export class PolymarketLiveClient {
     readonly config: PolymarketLiveVenueConfig,
     options: {
       clock?: () => Date;
+      nativeBalanceReader?: () => Promise<bigint | null>;
     } = {}
   ) {
     this.clock = options.clock ?? (() => new Date());
+    this.nativeBalanceReader = options.nativeBalanceReader ?? null;
   }
 
   static async fromConfig(
@@ -291,6 +344,7 @@ export class PolymarketLiveClient {
       clock?: () => Date;
       signer?: WalletClient;
       clientFactory?: PolymarketSdkClientFactory;
+      nativeBalanceReader?: () => Promise<bigint | null>;
     } = {}
   ): Promise<PolymarketLiveClient> {
     if (!config.auth.privateKey) {
@@ -303,14 +357,24 @@ export class PolymarketLiveClient {
       );
     }
 
+    const account = privateKeyToAccount(config.auth.privateKey as Hex);
     const signer = options.signer ?? createWalletClient({
-      account: privateKeyToAccount(config.auth.privateKey as Hex),
+      account,
       transport: custom({
         async request() {
           throw new Error('Polymarket live signer transport is offline-only; RPC requests are not configured here.');
         }
       })
     });
+    const nativeBalanceReader = options.nativeBalanceReader ?? (config.polygonRpcUrl
+      ? (() => {
+          const publicClient = createPublicClient({
+            chain: config.chainId === Chain.AMOY ? polygonAmoy : polygon,
+            transport: http(config.polygonRpcUrl)
+          });
+          return () => publicClient.getBalance({ address: account.address });
+        })()
+      : null);
     const clientFactory = options.clientFactory ?? createPolymarketSdkClient;
     const signatureType = config.auth.signatureType as SignatureTypeV2;
     const shared = {
@@ -347,7 +411,98 @@ export class PolymarketLiveClient {
         canPlaceOrders: true
       }
     }, {
-      clock: options.clock
+      clock: options.clock,
+      nativeBalanceReader: nativeBalanceReader ?? undefined
+    });
+  }
+
+  async fetchCollateralReadiness(input: LiveCollateralReadinessRequest): Promise<LiveAssetReadinessResult> {
+    const checkedAt = this.nowIso();
+    const blockingReasons: string[] = [];
+    let balance: number | null = null;
+    let allowance: number | null = null;
+    let polGasBalance: number | null = null;
+
+    try {
+      const response = await this.sdk.getBalanceAllowance({ asset_type: AssetType.COLLATERAL });
+      balance = parseTokenUnits(response.balance, 'pUSD balance');
+      allowance = parseTokenUnits(response.allowance, 'pUSD allowance');
+
+      if (balance < input.requiredBalance) {
+        blockingReasons.push(`pUSD balance ${balance} is below required ${input.requiredBalance}.`);
+      }
+      if (allowance < input.requiredAllowance) {
+        blockingReasons.push(`pUSD allowance ${allowance} is below required ${input.requiredAllowance}.`);
+      }
+    } catch (error) {
+      blockingReasons.push(`pUSD balance/allowance check failed: ${describeError(error)}`);
+    }
+
+    if (input.requiredPolGas > 0) {
+      if (!this.nativeBalanceReader) {
+        blockingReasons.push('POL gas balance check is not configured; set WRAITH_POLYGON_RPC_URL for read-only gas readiness.');
+      } else {
+        try {
+          const rawGasBalance = await this.nativeBalanceReader();
+          polGasBalance = rawGasBalance === null ? null : Number.parseFloat(formatEther(rawGasBalance));
+          if (polGasBalance === null || !Number.isFinite(polGasBalance)) {
+            blockingReasons.push('POL gas balance check returned an unreadable value.');
+          } else if (polGasBalance < input.requiredPolGas) {
+            blockingReasons.push(`POL gas balance ${polGasBalance} is below required ${input.requiredPolGas}.`);
+          }
+        } catch (error) {
+          blockingReasons.push(`POL gas balance check failed: ${describeError(error)}`);
+        }
+      }
+    }
+
+    return buildAssetReadiness({
+      checkedAt,
+      assetType: 'collateral',
+      tokenId: null,
+      balance,
+      allowance,
+      requiredBalance: input.requiredBalance,
+      requiredAllowance: input.requiredAllowance,
+      polGasBalance,
+      requiredPolGas: input.requiredPolGas,
+      blockingReasons
+    });
+  }
+
+  async fetchConditionalTokenReadiness(input: LiveConditionalTokenReadinessRequest): Promise<LiveAssetReadinessResult> {
+    const checkedAt = this.nowIso();
+    const blockingReasons: string[] = [];
+    let balance: number | null = null;
+    let allowance: number | null = null;
+
+    try {
+      const response = await this.sdk.getBalanceAllowance({
+        asset_type: AssetType.CONDITIONAL,
+        token_id: input.tokenId
+      });
+      balance = parseTokenUnits(response.balance, `conditional token ${input.tokenId} balance`);
+      allowance = parseTokenUnits(response.allowance, `conditional token ${input.tokenId} allowance`);
+
+      if (balance < input.requiredBalance) {
+        blockingReasons.push(`Conditional token balance ${balance} is below required ${input.requiredBalance} for ${input.tokenId}.`);
+      }
+      if (allowance < input.requiredAllowance) {
+        blockingReasons.push(`Conditional token allowance ${allowance} is below required ${input.requiredAllowance} for ${input.tokenId}.`);
+      }
+    } catch (error) {
+      blockingReasons.push(`Conditional token balance/allowance check failed for ${input.tokenId}: ${describeError(error)}`);
+    }
+
+    return buildAssetReadiness({
+      checkedAt,
+      assetType: 'conditional',
+      tokenId: input.tokenId,
+      balance,
+      allowance,
+      requiredBalance: input.requiredBalance,
+      requiredAllowance: input.requiredAllowance,
+      blockingReasons
     });
   }
 
@@ -737,6 +892,14 @@ export class PolymarketLiveGateway implements LiveExchangeGateway {
 
   fetchVenueStateSnapshot(input: PolymarketVenueStateQuery = {}): Promise<LiveVenueStateSnapshot> {
     return this.client.fetchVenueStateSnapshot(input);
+  }
+
+  getCollateralReadiness(input: LiveCollateralReadinessRequest): Promise<LiveAssetReadinessResult> {
+    return this.client.fetchCollateralReadiness(input);
+  }
+
+  getConditionalTokenReadiness(input: LiveConditionalTokenReadinessRequest): Promise<LiveAssetReadinessResult> {
+    return this.client.fetchConditionalTokenReadiness(input);
   }
 
   cancelOrder(venueOrderId: string, clientOrderId?: string | null): Promise<PolymarketCancelOrderResult> {

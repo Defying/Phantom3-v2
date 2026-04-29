@@ -36,6 +36,7 @@ function walletReadiness() {
     venue: config.liveExecution.venue,
     clobHost: venue.host,
     chainId: venue.chainId,
+    polygonRpcConfigured: venue.polygonRpcUrl !== null,
     signatureType: auth.signatureType,
     funderAddressConfigured: auth.funderAddress !== null,
     funderAddress: auth.funderAddress,
@@ -49,6 +50,13 @@ function walletReadiness() {
     configCanPlaceOrders: simulation ? false : auth.canPlaceOrders,
     canPlaceOrders: simulation ? false : auth.canPlaceOrders,
     gatewayInstalled: simulation ? false : Boolean(store && store.getState().execution.live.liveAdapterReady),
+    collateralReadiness: simulation || !store ? null : store.getState().execution.live.collateralReadiness,
+    readinessThresholds: {
+      minPusdBalance: config.liveExecution.minPusdBalance,
+      minPusdAllowance: config.liveExecution.minPusdAllowance,
+      minPolGas: config.liveExecution.minPolGas,
+      maxAgeMs: config.liveExecution.readinessMaxAgeMs
+    },
     setupError: simulation ? null : liveSetupError,
     message: simulation
       ? 'Simulation mode is active. No wallet is required and this process cannot place orders.'
@@ -142,6 +150,11 @@ async function main(): Promise<void> {
   app.get('/api/runtime/strategy', async () => store.getStrategySummary());
   app.get('/api/runtime/execution', async () => store.getState().execution);
   app.get('/api/live/wallet', async () => walletReadiness());
+  app.get('/api/live/readiness', async () => ({
+    wallet: walletReadiness(),
+    live: store.getState().execution.live,
+    safeToLog: true
+  }));
 
   app.get('/api/paper/strategy', async (request, reply) => {
     const paperStrategy = store.getPaperStrategyView(readLimit(request.query, 6, 12));
@@ -176,6 +189,7 @@ async function main(): Promise<void> {
     paperStrategySnapshotsEndpoint: '/api/paper/strategy/snapshots',
     upDownScanEndpoint: '/api/updown-scan',
     liveWalletEndpoint: '/api/live/wallet',
+    liveReadinessEndpoint: '/api/live/readiness',
     liveControlsAvailable: config.runtimeMode !== 'simulation',
     controlEndpoints: {
       pause: '/api/control/pause',

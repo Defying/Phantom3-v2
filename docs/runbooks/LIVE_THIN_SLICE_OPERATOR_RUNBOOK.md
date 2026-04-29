@@ -22,7 +22,7 @@ The presence of live flags, endpoints, or adapter code does **not** mean Wraith 
 
 Wraith now has a wallet/auth wiring path for Polymarket, but that only removes the “no signer exists” blocker. It does **not** make live capital safe.
 
-Sanitized readiness is exposed at `/api/live/wallet`. It reports whether a private key, L2 API credentials, API-key derivation permission, signature type, funder address, and live gateway are configured. It never returns the private key, API secret, or passphrase.
+Sanitized readiness is exposed at `/api/live/wallet` and `/api/live/readiness`. The wallet surface reports whether a private key, L2 API credentials, API-key derivation permission, signature type, funder address, live gateway, and read-only collateral readiness are configured. The readiness surface repeats the live-control state with `safeToLog: true`. Neither endpoint returns the private key, API secret, passphrase, or raw sensitive credentials.
 
 Required env for a wallet-backed live gateway:
 
@@ -31,13 +31,14 @@ Required env for a wallet-backed live gateway:
 - `WRAITH_POLYMARKET_FUNDER_ADDRESS` — required for signature types 1-3.
 - Either all three existing L2 API credentials (`WRAITH_POLYMARKET_API_KEY`, `WRAITH_POLYMARKET_API_SECRET`, `WRAITH_POLYMARKET_API_PASSPHRASE`) or `WRAITH_POLYMARKET_ALLOW_API_KEY_DERIVATION=true`.
 
-CLOB V2 live trading also requires collateral readiness that `/api/live/wallet` does **not** currently prove:
+CLOB V2 live trading also requires collateral readiness. The local runtime now has read-only gates for it, but these are still evidence gates rather than permission to trade:
 
-- BUY orders require pUSD balance and pUSD allowance on the funder address, including fee headroom.
-- SELL/flatten orders require outcome-token balance and allowance.
-- EOA signature type `0` also needs POL for gas.
+- BUY arming requires fresh pUSD balance and pUSD allowance on the funder address, above `WRAITH_LIVE_MIN_PUSD_BALANCE` and `WRAITH_LIVE_MIN_PUSD_ALLOWANCE`.
+- EOA signature type `0` should also prove POL gas headroom through `WRAITH_POLYGON_RPC_URL` when `WRAITH_LIVE_MIN_POL_GAS` is positive. If no Polygon RPC is configured, positive gas thresholds block arming.
+- SELL/flatten attempts require outcome-token balance and allowance for the exact token/quantity before Wraith submits a reduce-only exit.
 - A wallet can hold USDC.e and still be unable to buy if it has not been wrapped/credited as pUSD.
-- Wraith does **not** auto-wrap USDC.e to pUSD, does not call the CollateralOnramp, and must not hide collateral migration inside this repo without explicit operator approval.
+- Wraith does **not** auto-wrap USDC.e to pUSD, does not call the CollateralOnramp, does not call `updateBalanceAllowance`, and must not hide collateral migration or approval updates inside this repo without explicit operator approval.
+- Read-only balance/allowance checks are skipped while process-level live arming is disabled; enabling arming is the operator’s explicit gate for readiness probing.
 
 If wallet/auth initialization fails, the API process starts fail-closed: live arming stays scaffold/blocked and the blocking reason includes the wallet/auth setup error.
 
@@ -46,14 +47,15 @@ If wallet/auth initialization fails, the API process starts fail-closed: live ar
 ### 1) Boot reconcile must be proven on real venue state
 `apps/api/src/index.ts` can now install a Polymarket wallet-backed gateway when live env is complete, and `runtime-store.ts` can run startup reconciliation from that gateway. This still needs a real traced dry/live review on the intended wallet before live capital: open orders, fills, positions, and kill-switch behavior must be proven from venue evidence, not just unit tests.
 
-### 2) Unmatched venue evidence still needs caller-side incident handling
-`packages/live-execution/src/index.ts` now surfaces both `unmatchedVenueOrderIds` and `unmatchedVenueFillIds` from reconciliation, but the runtime still has to turn those results into incidents / kill-switch latches. Reporting the mismatch is not the same as making the session safe.
+### 2) Unmatched venue evidence still blocks live controls
+`packages/live-execution/src/index.ts` surfaces both `unmatchedVenueOrderIds` and `unmatchedVenueFillIds` from reconciliation, and the runtime kill-switches / blocks on non-clean startup reconciliation. This is a stronger fail-closed path, but it still needs a traced real-venue incident drill before any capital run.
 
 ### 3) Flatten is still only partially hardened
-The live adapter now fails closed if a same-market working buy order is still open, because flattening while entry orders can still fill is unsafe. That is only a stopgap:
+The live adapter now fails closed if a same-market working buy order is still open, and the runtime checks conditional-token balance/allowance before live reduce-only exits. That is still a stopgap:
 - it does **not** yet cancel working entry orders for you
 - it does **not** yet run a full flatten state machine
 - it does **not** yet prove flat inventory across restart before clearing the session
+- it does **not** prove venue flatness without a real fill/position trace
 
 ### 4) Kill-switch policy is not enforced end-to-end
 The architecture doc requires fresh reconciliation, no orphaned venue state, and explicit operator action before clearing the kill switch. The current bootstrap runtime does not enforce that full release contract.
@@ -73,7 +75,8 @@ Before anyone says “ready for live review,” require all of this:
 - one flatten trace that ends flat from venue fill evidence
 - one restart/reconcile trace during open live state
 - one incident trace showing unmatched venue order/fill evidence blocks new entries
-- one pUSD collateral-readiness trace proving the intended funder has pUSD balance/allowance and, for EOA signing, enough POL for gas
+- one pUSD collateral-readiness trace from `/api/live/readiness` proving the intended funder has pUSD balance/allowance and, for EOA signing, enough POL for gas
+- one conditional-token readiness trace showing an operator flatten blocks when inventory/allowance is insufficient and proceeds only when exact-token readiness is sufficient
 
 If any of those are missing, ambiguous, or only simulated in UI state, the answer is still **no-go**.
 
